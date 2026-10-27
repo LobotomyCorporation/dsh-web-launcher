@@ -1,0 +1,14 @@
+# 统一换行：源码用 LF，Windows 脚本保持 CRLF（cmd.exe 对纯 LF 的 .cmd 会出问题）
+* text=auto
+
+*.cs    text eol=lf
+*.md    text eol=lf
+*.ini   text eol=crlf
+*.cmd   text eol=crlf
+*.ps1   text eol=crlf
+
+# 二进制
+*.png   binary
+*.ico   binary
+*.exe   binary
+*.zip   binary

@@ -1,0 +1,17 @@
+# 运行时产物
+logs/
+*.log
+host.pid
+url.txt
+
+# rebuild.ps1 中途生成的临时脚本
+_install.cmd
+_start.cmd
+_warncheck.exe
+_warncheck.cs
+
+# 编译中间产物
+obj/
+bin/
+*.pdb
+*.cache

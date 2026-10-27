@@ -1,12 +1,12 @@
 # DSH Web 一键启动器 — 项目报告
 
-> 版本：1.2（2026-10-27，第二轮全量 review：图标改为 DeepSeek 鲸鱼 + 状态点、菜单版式定稿、清掉过程产物）
+> 版本：1.4（2026-10-27，第三轮：修「中文用户名下起不来」的批处理编码 bug，发布 v1.4 便携包）
 > 位置：`<仓库目录>\`
 > 装机位置：`%LOCALAPPDATA%\Programs\DshLauncher\`
 > 用途：**双击一个图标就能起 dsh web**，不再需要开 cmd / PowerShell 敲命令。
 
-**源码规模**：`DshLauncher.cs` 786 行 + `DshMenu.cs` 413 行 + `rebuild.ps1` 68 行，`/warn:4` 零警告；
-当前运行的 exe 编译于 15:04:44（与源码一致），启动器进程 pid 22684，3080 由 node 监听。
+**源码规模**：`DshLauncher.cs` 约 800 行 + `DshMenu.cs` 约 410 行 + `rebuild.ps1` 68 行，`/warn:4` 零警告；
+装机 exe 与源码目录 exe 的 SHA-256 一致（由 `rebuild.ps1` 校验），启动器常驻托盘，3080 由 node 监听。
 
 ---
 
@@ -247,6 +247,47 @@ v1.3 起从 `%TEMP%\.dsh-launcher` 搬到这里（临时目录会被清理、也
 2. **括号块里不能再出现裸括号**：`if errorlevel 1 echo …(dsh web is not running)` 会让 `( … )` 重定向块提前闭合，结果内容全打到屏幕上而不是文件里。
 3. **`netstat | findstr ":3080"` 噪声极大**（远端临时端口也含 3080），必须再串一个 `findstr "LISTENING"`。
 
+### 4.15 中文用户名下「系统找不到指定的路径」（v1.4 修复）
+
+现象（另一台机器，用户名是中文的比如 `张三`）：双击启动器，托盘一直是灰色，日志里 `dsh-web.log` 一个字节都没有，
+`diagnose` 能看到 `dsh web --port 3099` 手工敲是正常的——说明服务本身没问题，是启动器生成的批处理跑飞了。
+
+根因：`StartHost()` 会把启动命令写成一个批处理 `start-dsh-web.cmd`，老代码是这么拼的——
+
+```csharp
+"@echo off\r\n" +
+"chcp 65001 > nul\r\n" +                    // ← 罪魁
+"cd /d \"" + Cfg.WorkDir + "\"\r\n" +        // ← 中文路径
+...
+File.WriteAllText(Cfg.CmdFile, script, System.Text.Encoding.Default);   // ← 按系统 ANSI(GBK) 落盘
+```
+
+**写进去的是 GBK 字节，脚本第二行又把代码页切成 UTF-8**，于是 `cd /d "C:\Users\张三\..."` 这一行
+被 cmd 按 UTF-8 解码成乱码 → `cd` 失败 → 后面的重定向命令也没跑起来。
+
+我自己这边永远复现不了：我的用户名与工作目录全是 ASCII，
+GBK 和 UTF-8 编出来是同一串字节。**这类 bug 只有拿到"全中文环境"才暴露**，所以第一版发布时漏了。
+
+修法（两条一起上，互为兜底）：
+
+1. **不再切代码页**：删掉 `chcp 65001`。批处理的字节编码和 cmd 的默认代码页（系统 ANSI）从此一致。
+   Node 往 `dsh-web.log` 写的本来就是 UTF-8 字节，与 `chcp` 无关，日志照旧能正确读。
+2. **脚本里尽量不出现非 ASCII**：新增 `Cfg.Short()`（`GetShortPathName`）把所有路径换成 8.3 短名
+   （形如 `C:\Users\张三\AppData` → `C:\Users\ZHANGSAN~1\AppData`，具体由系统生成），`ShortCmd()` 负责把整条命令行里的带引号路径都换掉；
+   卷上关了 8.3 时自动退回原路径，靠第 1 条兜底。
+
+实测（本机造了中文目录 `D:\测试区\工作目录` + 中文名假 `dsh`）：
+
+| 脚本编码 | 里面有没有 `chcp` | 结果 |
+| --- | --- | --- |
+| GBK | 有（切 65001） | `The system cannot find the path specified` ← 复现用户故障 |
+| GBK | 无 | `cd` 成功，进入 `D:\测试区\工作目录` |
+| GBK | 无 + 短名 | 全部 ASCII，`cd` 成功 |
+
+整机联调：装一份隔离测试版（换 Mutex 名 + 换状态目录），`launcher.ini` 指到中文工作目录与中文名假 dsh，
+日志走完 `已启动 dsh web（cmd pid=…）` → `端口已就绪`，端口 3999 真起来了，生成的 `.cmd` 里 26 个非 ASCII 字节
+按 GBK 解码路径完全正确。
+
 ---
 
 ## 5. 本次全量 Review 的结论
@@ -364,7 +405,9 @@ v1.3 起从 `%TEMP%\.dsh-launcher` 搬到这里（临时目录会被清理、也
 | 打包完整度 | `DSH-Web-启动器-便携版.zip` 54,682 字节，内含 4 个文件（exe 105,984 / ini 614 / 使用说明 2,805 / diagnose.cmd 1,104） |
 | token 缓存 | `%LOCALAPPDATA%\DshLauncher\url.txt` 内的地址实测 **303**（日志被清空也能开对页面） |
 | 诊断脚本 | `diagnose.cmd` 输出含 dsh/node 位置、`npm root -g`、3080 监听行、目录清单、launcher.ini 全文 |
-| 当前状态 | 启动器 pid 54960（Medium，静默），3080 由 node 监听，托盘鲸鱼 + 绿点，桌面/开始菜单快捷方式指向安装目录 |
+| 中文路径（v1.4） | 造 `D:\测试区\工作目录` + 中文名假 dsh：老写法（GBK + `chcp 65001`）报 `The system cannot find the path specified`；新写法 `cd` 成功。整机联调日志 `已启动 dsh web → 端口已就绪`，3999 真实监听 |
+| 打包完整度（v1.4） | `DSH-Web-Launcher-portable-v1.4.zip` 55,123 字节，内含 4 个文件（exe 106,496 / ini 614 / 使用说明 3,154 / diagnose.cmd 1,104） |
+| 当前状态 | 启动器 pid 41732（Medium，静默），3080 由 node 监听，托盘鲸鱼 + 绿点，桌面/开始菜单快捷方式指向安装目录 |
 
 ---
 
@@ -420,10 +463,12 @@ tools\MenuPreview.exe 1.5 hover          :: 参数：缩放倍数 [run|start|sto
 **改动配置不用编译**：端口/工作目录/dsh 路径都在安装目录的 `launcher.ini` 里，改完重启启动器即可（§4.14）。
 
 **发新版给用户/朋友**：改完 `rebuild.ps1` → 把安装目录的 `DshLauncher.exe` 和模板 `launcher.ini` 拷进
-`dist\DSH-Web-启动器\` → 重新 `Compress-Archive` 成 `dist\DSH-Web-启动器-便携版.zip`。
+`dist\DSH-Web-启动器\` → 用 `Compress-Archive -Path "dist\DSH-Web-启动器\*" -DestinationPath "dist\DSH-Web-Launcher-portable-vX.Y.zip"` 打包
+（zip 名用纯 ASCII，GitHub 会把中文资产名抹成 `DSH-Web-.-.zip`）。
 
 **排错速查**：托盘没图标 = 完整性标签不是 Medium（§4.5）；菜单发虚 = manifest 没编进去（§4.9）；
-菜单多开标签页 = 重启启动器没带 `--silent`（§4.12）；`rebuild.ps1` 报莫名其妙的错 = 文件没存成带 BOM 的 UTF-8（§4.13）。
+菜单多开标签页 = 重启启动器没带 `--silent`（§4.12）；`rebuild.ps1` 报莫名其妙的错 = 文件没存成带 BOM 的 UTF-8（§4.13）；
+中文用户名下「系统找不到指定的路径」= 批处理里混了 GBK 与 `chcp 65001`，见 §4.15（v1.4 已修）。
 
 ---
 
@@ -434,7 +479,7 @@ tools\MenuPreview.exe 1.5 hover          :: 参数：缩放倍数 [run|start|sto
 2. **是否要「最小化到托盘 + 状态窗口」**：目前无主窗口，全靠托盘菜单；若想看到端口/pid/最近日志，
    可以加一个只读的小面板窗口。
 3. **清理工作区根目录那一百多个历史临时脚本**（需要你确认，我不会自作主张删）。
-4. ~~做成可发给别人的便携版~~ —— 已完成（v1.3，`dist\DSH-Web-启动器-便携版.zip`，见 §4.14）。
+4. ~~做成可发给别人的便携版~~ —— 已完成（v1.3 起，v1.4 修掉中文路径 bug，见 §4.14 / §4.15）。
    对方机器前提只有一个：装过 DSH **命令行**（`dsh --version` 有输出）。
 5. 可选：给 exe **签名**（自签名也行）能缓解 SmartScreen 提示，但对陌生机器仍会拦一次；正解是拿代码签名证书。
 6. 若真要分发给不熟的人，下一步可以做 `DshLauncher-Setup.exe`：自动装到 `%LOCALAPPDATA%\Programs`、

@@ -255,6 +255,47 @@ namespace DshLauncher
         public static string PidFile { get { return Path.Combine(StateDir, "host.pid"); } }
         public static string WorkDir = "";
 
+        // ---------- 把路径换成纯 ASCII 的 8.3 短名 ----------
+        // 生成的 start-dsh-web.cmd 是给 cmd.exe 读的批处理。批处理的编码必须跟 cmd 当前的
+        // 代码页一致：我们写的是系统 ANSI（中文机上是 GBK），但如果路径里带中文（比如
+        // C:\Users\张三\...），任何编码切换——尤其是老版本里那行 chcp 65001——都会让
+        // cmd 按错编码解析，cd /d 直接报"系统找不到指定的路径"。
+        // 最稳的做法不是猜编码，而是让脚本里根本不出现非 ASCII 字符：全部换成 8.3 短名。
+        [System.Runtime.InteropServices.DllImport("kernel32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode,
+            SetLastError = true)]
+        private static extern uint GetShortPathName(string longName, System.Text.StringBuilder shortName, uint size);
+
+        /// <summary>返回只含 ASCII 的短路径；已经全 ASCII、或系统没开 8.3 时原样返回。</summary>
+        public static string Short(string p)
+        {
+            if (string.IsNullOrEmpty(p)) return p;
+            bool ascii = true;
+            for (int i = 0; i < p.Length; i++) if (p[i] > 127) { ascii = false; break; }
+            if (ascii) return p;
+            try
+            {
+                System.Text.StringBuilder sb = new System.Text.StringBuilder(1024);
+                uint n = GetShortPathName(p, sb, (uint)sb.Capacity);
+                if (n > 0 && n < (uint)sb.Capacity)
+                {
+                    string s = sb.ToString();
+                    ascii = true;
+                    for (int i = 0; i < s.Length; i++) if (s[i] > 127) { ascii = false; break; }
+                    if (ascii) return s;
+                }
+            }
+            catch { }
+            return p;   // 短名不可用：保持原样，靠写文件时用 ANSI 编码兜底
+        }
+
+        /// <summary>把命令行里所有带引号的路径换成短名（dsh.cmd / node.exe / bin.js）。</summary>
+        public static string ShortCmd(string cmd)
+        {
+            if (string.IsNullOrEmpty(cmd)) return cmd;
+            return System.Text.RegularExpressions.Regex.Replace(cmd, "\"([^\"]+)\"",
+                delegate (System.Text.RegularExpressions.Match m) { return "\"" + Short(m.Groups[1].Value) + "\""; });
+        }
+
         /// <summary>在 PATH 里找一个可执行文件（Windows 的 where 语义，只看 .cmd/.exe/.bat）。</summary>
         private static string FindOnPath(string baseName)
         {
@@ -574,12 +615,17 @@ namespace DshLauncher
             }
 
             try { if (File.Exists(Cfg.LogFile)) File.Delete(Cfg.LogFile); } catch { }
+            // 工作目录先建出来，8.3 短名转换和 cmd 的 cd 都要它真实存在
+            try { if (!string.IsNullOrEmpty(Cfg.WorkDir) && !Directory.Exists(Cfg.WorkDir)) Directory.CreateDirectory(Cfg.WorkDir); } catch { }
+            // 脚本里一律用短名，保证全 ASCII；不写 chcp，避免批处理编码与代码页打架
+            string wd = Cfg.Short(Cfg.WorkDir);
+            string logTo = Cfg.Short(Cfg.LogFile);
+            string home = Cfg.Short(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".dsh"));
             string script =
                 "@echo off\r\n" +
-                "chcp 65001 > nul\r\n" +
-                "cd /d \"" + Cfg.WorkDir + "\"\r\n" +
-                "if not defined DSH_HOME set \"DSH_HOME=" + Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".dsh") + "\"\r\n" +
-                runCmd + " > \"" + Cfg.LogFile + "\" 2>&1\r\n";
+                "cd /d \"" + wd + "\"\r\n" +
+                "if not defined DSH_HOME set \"DSH_HOME=" + home + "\"\r\n" +
+                Cfg.ShortCmd(runCmd) + " > \"" + logTo + "\" 2>&1\r\n";
             try { File.WriteAllText(Cfg.CmdFile, script, System.Text.Encoding.Default); }
             catch (Exception ex) { Log.Write("写 cmd 失败：" + ex.Message); }
 

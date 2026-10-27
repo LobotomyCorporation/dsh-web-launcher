@@ -22,7 +22,7 @@
 
 ## 快速开始
 
-**方式一（推荐，不用装任何东西）**：下载 [`dist/DSH-Web-Launcher-portable-v1.3.zip`](dist/DSH-Web-Launcher-portable-v1.3.zip)
+**方式一（推荐，不用装任何东西）**：下载 [`dist/DSH-Web-Launcher-portable-v1.4.zip`](dist/DSH-Web-Launcher-portable-v1.4.zip)
 解压到任意固定目录，双击 `DshLauncher.exe`。第一次可能被 SmartScreen 拦，点「更多信息 → 仍要运行」。
 
 **方式二（自己编译）**：装好 .NET Framework 4 自带的 `csc.exe`（Win10/11 自带），
@@ -130,7 +130,7 @@ dsh web 现在只认**带 token 的地址**，直接开 `http://127.0.0.1:3080/`
 
 ## 发给别人用（便携版）
 
-`dist\DSH-Web-Launcher-portable-v1.3.zip`（54 KB）解压即用，里面只有 4 个文件：
+`dist\DSH-Web-Launcher-portable-v1.4.zip`（54 KB）解压即用，里面只有 4 个文件：
 
 | 文件 | 说明 |
 | --- | --- |
@@ -154,6 +154,9 @@ dsh web 现在只认**带 token 的地址**，直接开 `http://127.0.0.1:3080/`
 ## 已知提示
 
 - 第一次运行新编译的 exe 可能被 SmartScreen 拦（未签名）：点「仍要运行」。**每次重新编译后 hash 变了，可能再弹一次**。
+- **用户名或安装路径带中文**：1.3 及更早版本会在日志里报「系统找不到指定的路径 / The system cannot find the path specified」。
+  原因是生成的 `start-dsh-web.cmd` 用系统 ANSI（GBK）写入，脚本里却又切了 `chcp 65001`，cmd 按 UTF-8 去解 GBK 的中文路径直接崩。
+  1.4 起：脚本里不再切代码页，并把路径尽量换成纯 ASCII 的 8.3 短名；短名不可用的卷上靠 ANSI 兜底，两种都验过。
 - 「停止服务 / 重启服务」会断开正在对话的页面，刷新即可。
 - 源码目录里编译出来的 `DshLauncher.exe` 带低完整性标签（从 DSH 会话里写出的文件都是这样），**直接双击不会有托盘图标**；请用 `rebuild.ps1` 装到 `%LOCALAPPDATA%\Programs\DshLauncher\` 后跑那一份。
 - 如果浏览器弹「Microsoft Edge 未响应，因为现有实例正在以提升的权限运行」：

@@ -270,7 +270,7 @@ namespace DshLauncher
     internal sealed class MenuSpec
     {
         public IosMenu Menu;
-        public ToolStripMenuItem Status, Open, Restart, Stop, Auto, Log, Quit;
+        public ToolStripMenuItem Status, Open, Restart, Stop, Auto, Log, Quit, QuitAll;
         /// <summary>菜单上下两条透明占位条：ToolStripDropDownMenu 不吃 Padding，靠它们撑出边框留白。</summary>
         public ToolStripMenuItem SpacerTop, SpacerBottom;
         public float Scale = 1f;
@@ -383,7 +383,8 @@ namespace DshLauncher
         public static Action<string> Trace = delegate { };
         /// <summary>构建 iOS 风格托盘菜单。</summary>
         public static MenuSpec Create(Action onOpen, Action onRestart, Action onStop,
-                                      Action onToggleAuto, Action onLog, Action onQuit)
+                                      Action onToggleAuto, Action onLog, Action onQuit,
+                                      Action onQuitAll = null)
         {
             MenuSpec spec = new MenuSpec();
             IosMenu m = new IosMenu();
@@ -400,6 +401,10 @@ namespace DshLauncher
             spec.Auto = new ToolStripMenuItem("开机自动启动", null, delegate { onToggleAuto(); });
             spec.Log = new ToolStripMenuItem("打开日志", null, delegate { onLog(); });
             spec.Quit = new ToolStripMenuItem("退出启动器", null, delegate { onQuit(); });
+            // 「停服务 + 退启动器」一条走完：给不想让 dsh web 继续占端口的人用
+            spec.QuitAll = new ToolStripMenuItem("退出启动器并停止服务", null,
+                delegate { if (onQuitAll != null) onQuitAll(); });
+            spec.QuitAll.Tag = "danger";
 
             m.Items.Add(spec.Status);
             m.Items.Add(new ToolStripSeparator());
@@ -411,6 +416,7 @@ namespace DshLauncher
             m.Items.Add(spec.Log);
             m.Items.Add(new ToolStripSeparator());
             m.Items.Add(spec.Quit);
+            m.Items.Add(spec.QuitAll);
 
             // 顶部/底部透明占位：ToolStripDropDownMenu 会把 Padding 吃掉（实测加上去尺寸不变），
             // 只能靠一个空条目把「菜单边框到胶囊」的距离撑出来，否则最后一条贴着底边。

@@ -22,7 +22,7 @@
 
 ## 快速开始
 
-**方式一（推荐，不用装任何东西）**：下载 [`dist/DSH-Web-Launcher-portable-v1.4.zip`](dist/DSH-Web-Launcher-portable-v1.4.zip)
+**方式一（推荐，不用装任何东西）**：下载 [`dist/DSH-Web-Launcher-portable-v1.6.zip`](dist/DSH-Web-Launcher-portable-v1.6.zip)
 解压到任意固定目录，双击 `DshLauncher.exe`。第一次可能被 SmartScreen 拦，点「更多信息 → 仍要运行」。
 
 **方式二（自己编译）**：装好 .NET Framework 4 自带的 `csc.exe`（Win10/11 自带），
@@ -43,6 +43,8 @@
 | 停止服务 | 右键托盘 → 停止服务 |
 | 看输出 | 右键托盘 → 打开日志（`%LOCALAPPDATA%\DshLauncher\dsh-web.log`：dsh web 的控制台输出） |
 | 开机自启 | 右键托盘 → 勾选「开机自动启动」（写 HKCU Run 项，`--silent` 静默模式） |
+| 退出但保留服务 | 右键托盘 → 退出启动器（dsh web 继续跑，下次双击直接接管，不重启） |
+| 退出并停服务 | 右键托盘 → 退出启动器并停止服务（连 dsh web 一起收掉，会先弹一句确认） |
 
 右键菜单是自绘的 iOS 风格：圆角、悬浮胶囊、蓝色主操作、红色危险操作，
 并且**按鼠标所在显示器自动缩放**（100% / 125% / 150% / 200% 都按真实像素重排，不会发虚）。
@@ -132,7 +134,7 @@ dsh web 现在只认**带 token 的地址**，直接开 `http://127.0.0.1:3080/`
 
 ## 发给别人用（便携版）
 
-`dist\DSH-Web-Launcher-portable-v1.4.zip`（54 KB）解压即用，里面只有 4 个文件：
+`dist\DSH-Web-Launcher-portable-v1.6.zip`（54 KB）解压即用，里面只有 4 个文件：
 
 | 文件 | 说明 |
 | --- | --- |

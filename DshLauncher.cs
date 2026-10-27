@@ -452,7 +452,7 @@ namespace DshLauncher
     {
         private readonly NotifyIcon _ni;
         private readonly MenuSpec _menu;
-        private readonly ToolStripMenuItem _iOpen, _iRestart, _iStop, _iAuto, _iLog, _iQuit, _iStatus;
+        private readonly ToolStripMenuItem _iOpen, _iRestart, _iStop, _iAuto, _iLog, _iQuit, _iStatus, _iQuitAll;
         private readonly System.Windows.Forms.Timer _timer;
         private readonly Form _anchor;   // 隐藏宿主窗体，仅用于跨线程封送（不显示）
         private St _state = St.Unknown;
@@ -504,7 +504,8 @@ namespace DshLauncher
                 delegate { _silent = false; StopHost(true); },
                 delegate { ToggleAutostart(); },
                 delegate { OpenLog(); },
-                delegate { Quit(); });
+                delegate { Quit(); },
+                delegate { QuitAll(); });
             _menu = spec;
             _iStatus = spec.Status;
             _iOpen = spec.Open;
@@ -513,6 +514,7 @@ namespace DshLauncher
             _iAuto = spec.Auto;
             _iLog = spec.Log;
             _iQuit = spec.Quit;
+            _iQuitAll = spec.QuitAll;
             _ni.ContextMenuStrip = spec.Menu;
             _iAuto.Checked = IsAutostart();
             spec.Menu.Invalidate();
@@ -562,6 +564,7 @@ namespace DshLauncher
             _menu.SetStatus("状态：" + txt + (_detail.Length > 0 && s == St.Error ? "（" + _detail + "）" : ""), dot);
             _iOpen.Enabled = s == St.Running;
             _iStop.Enabled = s == St.Running || s == St.Starting;
+            _iQuitAll.Enabled = _iStop.Enabled;   // 服务没在跑时这条等同「退出启动器」，禁用免得误导
             _iRestart.Enabled = true;
             try { if (_ni.Text != tip) _ni.Text = tip.Length > 63 ? tip.Substring(0, 63) : tip; } catch { }
 
@@ -709,10 +712,55 @@ namespace DshLauncher
             if (ask) Notify("已停止", n > 0 ? "已关闭 " + n + " 个 DSH Web 进程。" : "没有找到正在运行的进程。");
         }
 
+        /// <summary>取某个进程的命令行（拿不到就返回 null）。</summary>
+        private static string CmdLineOf(int pid)
+        {
+            try
+            {
+                using (ManagementObjectSearcher s = new ManagementObjectSearcher(
+                    "SELECT CommandLine FROM Win32_Process WHERE ProcessId=" + pid.ToString()))
+                {
+                    foreach (ManagementBaseObject o in s.Get())
+                    {
+                        string cl = o["CommandLine"] as string;
+                        if (cl != null) return cl;
+                    }
+                }
+            }
+            catch { }
+            return null;
+        }
+
         private static int KillDshHosts()
         {
             int killed = 0;
             List<int> pids = new List<int>();
+
+            // ① 先收「我们自己拉起的那棵树」：cmd 包装器 → dsh(.cmd) → node → 子进程。
+            //    这一条对便携版 dsh（不是 npm 全局的 bin.js）同样有效，靠 host.pid 里记的 cmd pid。
+            try
+            {
+                if (File.Exists(Cfg.PidFile))
+                {
+                    foreach (string raw in File.ReadAllLines(Cfg.PidFile))
+                    {
+                        string ln = raw.Trim();
+                        if (!ln.StartsWith("cmd=", StringComparison.Ordinal)) continue;
+                        int p0;
+                        if (!int.TryParse(ln.Substring(4).Trim(), out p0) || p0 <= 0) continue;
+                        string cl = CmdLineOf(p0);
+                        // 只认我们自己写的那条批处理，避免 pid 复用误杀别人的进程
+                        if (cl == null) continue;
+                        if (cl.IndexOf("start-dsh-web", StringComparison.OrdinalIgnoreCase) < 0 &&
+                            cl.IndexOf("dsh", StringComparison.OrdinalIgnoreCase) < 0) continue;
+                        pids.Add(p0);
+                        Log.Write("按 host.pid 收进程树：" + p0 + " → " + (cl.Length > 90 ? cl.Substring(0, 90) + "…" : cl));
+                    }
+                }
+            }
+            catch (Exception ex) { Log.Write("读 host.pid 失败：" + ex.Message); }
+
+            // ② 再按命令行启发式兜底（别的实例起的、或旧版本留下的）
             try
             {
                 using (ManagementObjectSearcher s = new ManagementObjectSearcher(
@@ -724,7 +772,12 @@ namespace DshLauncher
                         if (cl == null) continue;
                         if (cl.IndexOf(@"dsh\lib\bin.js", StringComparison.OrdinalIgnoreCase) < 0) continue;
                         if (cl.IndexOf(" web", StringComparison.OrdinalIgnoreCase) < 0) continue;
-                        try { pids.Add(Convert.ToInt32(o["ProcessId"])); } catch { }
+                        try
+                        {
+                            int p1 = Convert.ToInt32(o["ProcessId"]);
+                            if (!pids.Contains(p1)) pids.Add(p1);
+                        }
+                        catch { }
                     }
                 }
             }
@@ -814,6 +867,28 @@ namespace DshLauncher
         {
             Log.Write("启动器退出（服务保持运行）");
             try { _timer.Stop(); } catch { }
+            try { _ni.Visible = false; } catch { }
+            ExitThread();
+        }
+
+        /// <summary>关掉 dsh web 再退出启动器。会断开正在看的页面，所以先问一句。</summary>
+        private void QuitAll()
+        {
+            _silent = false;
+            DialogResult r = MessageBox.Show(
+                "将关闭正在运行的 dsh web（浏览器里那个页面会断开），然后退出启动器。\r\n\r\n确定吗？",
+                "DSH Web 启动器", MessageBoxButtons.YesNo, MessageBoxIcon.Warning,
+                MessageBoxDefaultButton.Button2);
+            if (r != DialogResult.Yes) return;
+            Log.Write("退出启动器并停止服务（用户确认）");
+            try { _timer.Stop(); } catch { }
+            lock (_lock) { _state = St.Stopped; }
+            try { _menu.SetStatus("状态：关闭中…", Ios.Gray); } catch { }
+            int n;
+            try { n = KillDshHosts(); } catch (Exception ex) { Log.Write("关闭失败：" + ex.Message); n = 0; }
+            Log.Write("已关闭 " + n + " 个 dsh web 进程，启动器退出");
+            try { Cfg.ClearUrlCache(); } catch { }
+            try { WaitPortClosed(8000); } catch { }
             try { _ni.Visible = false; } catch { }
             ExitThread();
         }

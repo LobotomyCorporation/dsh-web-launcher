@@ -64,7 +64,7 @@ internal static class PreviewProgram
         Form back = new Form();
         back.FormBorderStyle = FormBorderStyle.None;
         back.StartPosition = FormStartPosition.Manual;
-        back.Bounds = new Rectangle(120, 120, 520, 680);
+        back.Bounds = new Rectangle(120, 120, 560, 700);
         back.BackColor = Color.FromArgb(0x4D, 0x6B, 0xFE);
         back.Paint += delegate (object o, PaintEventArgs e)
         {
@@ -87,9 +87,11 @@ internal static class PreviewProgram
             }
         };
         back.Show();
+        back.TopMost = true;      // 截图靠屏幕像素，必须压在最前面，否则会抓到背后的窗口
+        back.Activate();
         Application.DoEvents();
 
-        Point at = new Point(back.Left + 60, back.Top + 60);
+        Point at = new Point(back.Left + 50, back.Top + 50);
         spec.Menu.Show(at);
 
         Timer hv = new Timer();
@@ -109,13 +111,20 @@ internal static class PreviewProgram
         }
 
         // 自截：等菜单画完，把背景窗体那块区域抓下来存盘，然后退出
+        // 注意：这里抓的是屏幕像素，所以背景窗体必须真的在最前面——否则抓到的是压在上面的
+        // QQ / 资源管理器窗口（会漏出桌面内容）。先置顶 + 激活，再等一帧。
         Timer shot = new Timer();
-        shot.Interval = 700;
+        shot.Interval = 900;
         shot.Tick += delegate
         {
             shot.Stop();
             try
             {
+                back.TopMost = false;
+                back.BringToFront();
+                back.Activate();
+                Application.DoEvents();
+                System.Threading.Thread.Sleep(220);
                 Rectangle b = back.Bounds;
                 using (Bitmap bmp = new Bitmap(b.Width, b.Height))
                 {

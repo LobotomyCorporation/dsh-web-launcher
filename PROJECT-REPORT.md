@@ -288,6 +288,21 @@ GBK 和 UTF-8 编出来是同一串字节。**这类 bug 只有拿到"全中文�
 日志走完 `已启动 dsh web（cmd pid=…）` → `端口已就绪`，端口 3999 真起来了，生成的 `.cmd` 里 26 个非 ASCII 字节
 按 GBK 解码路径完全正确。
 
+### 4.16 `launcher.ini` 的编码容错（v1.5）
+
+另一台机器上出现过「`dsh=` 明明填了却不生效」：编辑器把 `launcher.ini` 存成了 GBK，
+而 `File.ReadAllLines()` 默认按 UTF-8 解，中文路径被解成一串替换字符，
+于是那个 `dsh=` 指向不存在的路径（日志上表现为 `dsh=null`）。
+
+修法：新增 `Cfg.ReadIniLines()`——先按 UTF-8 **严格模式**解（`new UTF8Encoding(false, true)`），
+抛异常就退回 `Encoding.Default`（系统 ANSI/GBK），最后剥掉可能的 BOM。
+UTF-8 带/不带 BOM、GBK、ANSI 都能读，用户用什么编辑器保存都不影响。
+
+实测（隔离测试版，状态目录挪到工作区里绕开沙箱权限）：ini 存成 GBK（首字节 `23 20 44 53`，无 BOM），
+内容 `port=3997` / 中文 `workdir` / 中文 `dsh` 路径，启动后生成的批处理里
+`cd /d` 的中文路径与 dsh 路径全部正确，日志出现 `已启动 dsh web（cmd pid=…），等待端口 3997`，
+中文工作目录被自动创建。（假 dsh 自身是 `node -e` 的小服务器，脚本写错导致端口没起来，与启动器无关。）
+
 ---
 
 ## 5. 本次全量 Review 的结论

@@ -41,13 +41,28 @@ namespace DshLauncher
             return _ini.TryGetValue(key, out v) ? v : null;
         }
 
+        /// <summary>
+        /// 读 ini 的每一行。编码容错：优先按 UTF-8（严格）解，失败就当 ANSI/GBK 解，并去掉 BOM。
+        /// 很多编辑器（Notepad2/老 VS、以及中文系统上的记事本另存）会把 ini 存成 GBK，
+        /// 直接 File.ReadAllLines 会把中文路径读成一串替换字符，表现为「dsh= 明明填了却不生效」。
+        /// </summary>
+        private static string[] ReadIniLines()
+        {
+            byte[] bytes = File.ReadAllBytes(IniFile);
+            string text;
+            try { text = new System.Text.UTF8Encoding(false, true).GetString(bytes); }
+            catch { text = System.Text.Encoding.Default.GetString(bytes); }
+            if (text.Length > 0 && text[0] == '\uFEFF') text = text.Substring(1);
+            return text.Replace("\r\n", "\n").Split('\n');
+        }
+
         private static Dictionary<string, string> LoadIni()
         {
             Dictionary<string, string> d = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
             try
             {
                 if (!File.Exists(IniFile)) return d;
-                foreach (string raw in File.ReadAllLines(IniFile))
+                foreach (string raw in ReadIniLines())
                 {
                     string line = raw.Trim();
                     if (line.Length == 0 || line[0] == '#' || line[0] == ';' || line[0] == '[') continue;

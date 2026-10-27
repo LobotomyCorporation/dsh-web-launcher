@@ -273,7 +273,7 @@ GBK 和 UTF-8 编出来是同一串字节。**这类 bug 只有拿到"全中文�
 1. **不再切代码页**：删掉 `chcp 65001`。批处理的字节编码和 cmd 的默认代码页（系统 ANSI）从此一致。
    Node 往 `dsh-web.log` 写的本来就是 UTF-8 字节，与 `chcp` 无关，日志照旧能正确读。
 2. **脚本里尽量不出现非 ASCII**：新增 `Cfg.Short()`（`GetShortPathName`）把所有路径换成 8.3 短名
-   （形如 `C:\Users\张三\AppData` → `C:\Users\ZHANGSAN~1\AppData`，具体由系统生成），`ShortCmd()` 负责把整条命令行里的带引号路径都换掉；
+   （把 `C:\Users\张三\AppData` 这类路径换成系统生成的 8.3 短名，具体形式由 Windows 决定），`ShortCmd()` 负责把整条命令行里的带引号路径都换掉；
    卷上关了 8.3 时自动退回原路径，靠第 1 条兜底。
 
 实测（本机造了中文目录 `D:\测试区\工作目录` + 中文名假 `dsh`）：

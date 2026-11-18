@@ -1,11 +1,14 @@
 # DSH Web 一键启动器 — 项目报告
 
-> 版本：1.6（2026-10-27，第四轮：新增「退出启动器并停止服务」+ 停止服务改为按记录收进程树，发布 v1.6 便携包）
+> 版本：1.12（2026-11-18，第七轮：辅助功能接上 opencode-go 代理——启动即打印模型清单与月额度，见 §5.9）
+> 上一版：1.11（2026-11-16，第六轮：托盘菜单第一次弹出盖住光标——悬停预缩放，见 §5.8）
+> 上上版：1.10（2026-11-16，第五轮：非中断类清理——日志 / 通知 / 自启 / 菜单宽度 / 访问缓存 / 模块扫描 / 构建脚本）
+> 历史：v1.6（2026-10-27，第四轮：新增「退出启动器并停止服务」+ 停止服务改为按记录收进程树，见 §4.17）
 > 位置：`<仓库目录>\`
 > 装机位置：`%LOCALAPPDATA%\Programs\DshLauncher\`
 > 用途：**双击一个图标就能起 dsh web**，不再需要开 cmd / PowerShell 敲命令。
 
-**源码规模**：`DshLauncher.cs` 约 800 行 + `DshMenu.cs` 约 410 行 + `rebuild.ps1` 68 行，`/warn:4` 零警告；
+**源码规模**：`DshLauncher.cs` 1409 行 + `DshMenu.cs` 834 行 + `rebuild.ps1` 114 行，`/warn:4` 零警告；
 装机 exe 与源码目录 exe 的 SHA-256 一致（由 `rebuild.ps1` 校验），启动器常驻托盘，3080 由 node 监听。
 
 ---
@@ -40,12 +43,14 @@ DshLauncher.exe (WinExe 子系统 · 无控制台 · 托盘常驻)
         ├─ TcpClient 探测 127.0.0.1:3080 ──→ 通？→ 直接开浏览器（不重启服务）
         │                                   └─ 不通？→ 启动服务
         │
-        ├─ 起服务：写 %LOCALAPPDATA%\DshLauncher\start-dsh-web.cmd
-        │          内容 = chcp 65001 + cd 工作目录 + node bin.js web --port 3080 --no-open
+        ├─ 起服务：写 %LOCALAPPDATA%\DshLauncher\start-dsh-web.cmd（纯 ASCII）
+        │          内容 = cd /d 工作目录 + 调 dsh.cmd web --port 3080 --no-open，路径一律 8.3 短名
+        │          不切 chcp：批处理字节与 cmd 代码页保持一致（§4.15）
         │          以 CreateNoWindow + Hidden 启动，输出重定向到 dsh-web.log
         │          轮询端口（最长 120 秒）→ 就绪后从日志里取带 token 的地址 → 用 explorer.exe 打开
         │
-        └─ 托盘菜单（iOS 风格自绘、按鼠标所在屏 DPI 缩放）：状态球 + 打开界面 / 重启 / 停止 / 开机自启 / 打开日志 / 退出
+        └─ 托盘菜单（iOS 风格自绘、按鼠标所在屏 DPI 缩放、每行带图标槽）：
+           状态球 / 打开界面 / 重启 / 停止 / 开机自启 / 辅助功能▸（模块目录）/ 打开日志 / 退出 / 退出并停止
            托盘图标 = DeepSeek 鲸鱼 + 右下角状态点（运行中绿 / 启动中橙 / 失败红 / 未运行灰）
 ```
 
@@ -66,11 +71,13 @@ VBScript 没有 GUI 子系统、没有真正的单实例保护、错误信息（
 | `app.manifest` | 声明 **PerMonitorV2** DPI 感知 + Windows 10/11 supportedOS（不加这个菜单必然发虚） |
 | `logo256.png` | DeepSeek 鲸鱼标（由 `deepseek-color.svg` 经 Edge 无头渲染得到），编译时以 `/resource` 内嵌 |
 | `dsh.ico` | 多尺寸图标（16/20/24/32/48/64/128/256），只给 exe 与快捷方式用；托盘图标是运行时合成的 |
+| `toast-inverted.png` | 反色版鲸鱼，安装成 `dsh-toast.png` 后专给 Windows 通知用（原因见 §4.18） |
+| `icons\` | 菜单行首图标（`<菜单文字>.png`，8 张 64px 透明 PNG + `说明.txt`），构建时随 exe 一起装到安装目录 |
 | `DshLauncher.exe` | 编译产物（**注意：低完整性标签，直接双击会没有托盘图标**，见 §4.5） |
-| `launcher.ini` | **运行期配置**（端口 / 工作目录 / dsh 路径），安装目录里那份生效，本目录这份是模板 |
-| `rebuild.ps1` | 一键「编译 → 停旧进程 → 安装带 Medium 标签的副本 → **静默**重启 → 自检」 |
-| `dist\` | 便携版成品：`DSH-Web-启动器\`（exe + ini + 使用说明 + diagnose.cmd）与同名 zip，54 KB |
-| `docs\` | 4 张设计图：`menu-final.png`（150% 悬停态）、`menu-states.png`（四状态）、`icon-states.png`（图标四态）、`tray-live.png`（真实托盘） |
+| `launcher.ini` | **运行期配置**（端口 / 工作目录 / dsh 路径 / 模块目录 / verbose），安装目录里那份生效，本目录这份是模板 |
+| `rebuild.ps1` | 五步「编译 → 停旧进程 → 安装带 Medium 标签的副本 → **静默**重启 → 自检」；安装后与启动后都校验 SHA-256，复制失败直接报错 |
+| `dist\` | 便携版成品：`DSH-Web-启动器\`（exe + ini + 使用说明 + diagnose.cmd）与同名 zip（v1.6 时 54 KB；v1.10 只改了源码，未重新打包） |
+| `docs\` | 设计图与证据图：`menu-final.png`（150% 悬停态）、`menu-states.png`（四状态）、`icon-states.png`（图标四态）、`menu-aux-module.png`（辅助功能二级菜单）、`icon-log-notepad.png`、`icon-autostart.png`、`notification-icon-before/after.png`（通知图标取证） |
 | `tools\MenuPreview.*` | 单独预览菜单外观（`MenuPreview.exe 1.5 [run\|start\|stop\|err] [hover]`），不属于运行链路 |
 | `tools\MakeIco.*` | 由 `logo256.png` 生成多尺寸 `dsh.ico`（≤64 用 DIB，128/256 用 PNG 压缩） |
 | `tools\IconPreview.*` | 把托盘四状态图标渲染成 `docs\icon-states.png` 供核对 |
@@ -81,8 +88,9 @@ VBScript 没有 GUI 子系统、没有真正的单实例保护、错误信息（
 
 | 文件 | 说明 |
 | --- | --- |
-| `DshLauncher.exe` + `dsh.ico` | **Medium 完整性**副本，桌面/开始菜单快捷方式指向这里 |
-| `launcher.ini` | 运行期配置（端口 / 工作目录 / dsh 路径） |
+| `DshLauncher.exe` + `dsh.ico` + `dsh-toast.png` | **Medium 完整性**副本，桌面/开始菜单快捷方式指向这里；`dsh-toast.png` 专给 Windows 通知用（§4.18） |
+| `icons\` | 菜单图标（构建时从仓库 `icons\` 复制） |
+| `launcher.ini` | 运行期配置（端口 / 工作目录 / dsh 路径 / 模块目录 / verbose） |
 
 ### 运行时状态 `%LOCALAPPDATA%\DshLauncher\`
 
@@ -95,7 +103,8 @@ v1.3 起从 `%TEMP%\.dsh-launcher` 搬到这里（临时目录会被清理、也
 | `dsh-web.log` | **dsh web 的控制台输出**，带 token 的地址就在其中一行 |
 | `url.txt` | **最近一次带 token 的地址**（日志被清掉/轮转也不会丢，见 §4.14） |
 | `host.pid` | 上次启动的 cmd pid / 端口 / 时间 |
-| `launcher.log` | 启动器主日志（UTF-8，超过 1 MB 自动重开） |
+| `launcher.log` | 启动器主日志（UTF-8；超过 1 MB 改名为 `launcher.log.1`，保留上一轮现场） |
+| `aux\` | 「辅助功能」模块目录（`aux_dir=` 可改）；首次运行写入 `说明.txt` |
 
 ---
 
@@ -222,7 +231,9 @@ v1.3 起从 `%TEMP%\.dsh-launcher` 搬到这里（临时目录会被清理、也
 - **错 1**：`schtasks /Create /TR "\"路径\DshLauncher.exe\" --silent"` 报 `ERROR: The system cannot find the file specified.`，启动器直接没起来（自检抛 `launcher did not start`）。改成让计划任务去跑一个 `.cmd` 才干净。
 - **错 2**：脚本里 `Set-Content -Path $startCmd …` 报 `Cannot bind argument to parameter 'Path' because it is null.`，且**报错行号总比文件实际行号少 3 行**。
 - **真因**：`rebuild.ps1` 存成了**无 BOM 的 UTF-8**，PowerShell 5.1 按 ANSI(GBK) 解析中文注释，语句边界错位、变量赋值落进字符串，才会出现这种完全不搭界的错误。
-- **规矩**：`.ps1` 必须 **UTF-8 带 BOM**（`[System.Text.UTF8Encoding]::new($true)` 写入）；`.cmd` 路径写死成 `"$dir\_start.cmd"` 字面量，别依赖 `$PSScriptRoot`/`Join-Path`。
+- **规矩**：`.ps1` 里只要有中文，就必须 **UTF-8 带 BOM**（`[System.Text.UTF8Encoding]::new($true)` 写入）；`.cmd` 路径写死成 `"$dir\_start.cmd"` 字面量，别依赖 `$PSScriptRoot`/`Join-Path`。
+- **v1.10 起**：`rebuild.ps1` 已改成**全 ASCII**（注释也用英文，路径靠 `%~dp0` / `%LOCALAPPDATA%` 运行时展开），不再依赖 BOM；
+  脚本里一旦混入非 ASCII 字符会主动 `throw`。以后往里加中文注释，仍要存成带 BOM 的 UTF-8。
 
 ### 4.14 「换台电脑也能用」与「发给别人」（v1.3）
 
@@ -329,11 +340,77 @@ v1.3 之后支持在 `launcher.ini` 里写 `dsh=` 指向任意 dsh 命令（很�
 `C:\WINDOWS\system32\cmd.exe /c ""%LOCALAPPDATA%\DshLauncher\start-dsh-web.cmd""`，两个匹配条件都命中，
 `/T` 会把它下面的 node 一起带走。
 
+### 4.18 通知图标是「像素风 D」/ 金黄色鲸鱼（v1.7）
+
+现象：启动时弹出的那条 Windows 通知，托盘里明明是鲸鱼，通知里却是个灰底白字 `D`；把图标换成鲸鱼之后又变成**金黄色**。
+
+根因两层：
+
+1. **进程没有应用身份**。旧式 `Shell_NotifyIcon` 气泡在 Win11 上会被转成 toast，其标题和图标来自进程的
+   AppUserModelID；没注册时 Windows 只能填系统通用占位图标（灰底白 D），标题也只能显示 `DshLauncher.exe`。
+2. **Win11 会把这类气泡的图标整体取反**。注册身份、`IconUri` 指向鲸鱼 PNG 后，形状对了但颜色是 `#B29401`——
+   正好是品牌蓝 `#4D6BFE` 的 RGB 补色（255-77=178、255-107=148、255-254=1）。换 `.ico` 一样、换新 AUMID 也一样，
+   说明不是图标缓存，而是渲染时取反。
+
+修法（`Program.RegisterAppIdentity()`，在 `RunMain` 第一行调用）：
+
+- 启动时写 `HKCU\Software\Classes\AppUserModelId\DSH.Web.Launcher`：`DisplayName=DSH Web 启动器`、
+  `IconUri=<安装目录>\dsh-toast.png`，再 `SetCurrentProcessExplicitAppUserModelID("DSH.Web.Launcher")`。
+- 通知图标使用**预先反色**的 PNG（仓库里 `toast-inverted.png`，安装成 `dsh-toast.png`），系统再取反一次恰好还原原色。
+- 托盘图标 / exe 图标 / 快捷方式图标走的是另一条链路、不取反，保持原样（§4.11 的鲸鱼+状态点未改）。
+
+顺带发现的既有缺陷（本次未动）：`tools\MakeIco` 写出的 `dsh.ico` 里 128/256 两帧是坏的（`.NET Icon` 读取抛
+「请求的范围扩展超过了数组的结尾」），Explorer 会回退到 ≤64 帧，所以平时看不出来。
+
+### 4.19 「辅助功能」做成模块目录（v1.8）
+
+需求起初是「二级菜单第一条：运行某个 .bat」，随后用户改口：**要模块化**——发布出去以后，
+别人也能自己往里加功能。于是不做「一条写死的脚本」，改成目录驱动。
+
+- 菜单内容不写在代码里：`MenuSpec.RefreshAux()` 每次弹出前扫一遍
+  `%LOCALAPPDATA%\DshLauncher\aux`（`launcher.ini` 的 `aux_dir=` 可改）。
+  `.bat/.cmd/.exe/.ps1` → 一条菜单项（文件名＝菜单文字，按名字排序）；子文件夹 → 下一级菜单（只展开一层，避免无底洞）。
+- 不用重启：`m.Opening` 里先 `RefreshAux()` 再 `ApplyScale()`，丢文件进去下次右键就出现。
+- 执行：`Launcher.RunAuxScript(path)`——bat/cmd 走 `cmd /c`，ps1 走
+  `powershell -NoProfile -ExecutionPolicy Bypass -File`，exe 直接起；统一隐藏窗口、
+  不提权、工作目录＝脚本目录，失败写日志 + 气泡。
+- 首次运行 `EnsureAuxDir()` 建目录并写 `说明.txt`（UTF-8 BOM）；「打开模块文件夹」一键到位。
+- 代码侧仍留 `AddAuxItem(text, onClick)` 做编译期扩展，条目存在 `_auxCustom` 里，不随目录扫描丢失。
+- 踩到的坑：`ToolStripDropDownMenu` 是独立窗口，二级菜单不套 `IosRenderer` + `StylePopup`
+  就会退回系统灰框；子菜单箭头要自己画（`IosRenderer.DrawSubArrow`）并在右侧留 `14px × 缩放`；
+  等宽要逐层算，所以样式抽成了递归的 `MenuSpec.StyleDropDown(...)`。
+- 验证：展开「辅助功能 ▸」是「启动代理（opencode-go）」+ 分割线 +「打开模块文件夹」；
+  反射调用安装版的 `Launcher.RunAuxScript` 跑一个写标记文件的 .bat，标记文件生成、
+  `launcher.log` 记录 `辅助功能：已运行 …（pid …）`。截图：`docs\menu-aux-module.png`。
+
+### 4.20 每行菜单加图标槽（v1.9）
+
+- 渲染：`IosRenderer.IconRoom`（21×缩放）+ `DrawIconSlot`。有图画图（悬停放大 8%），
+  没图只在悬停时画一枚淡蓝圆角槽 + 中心小点——平时不画，菜单不会变成一排空盒子。
+- 排版：`ApplyScale` / `StyleDropDown` 把 `padH + iconRoom` 加进左边距，主菜单和
+  「辅助功能」各级子菜单统一缩进；文字定位同步改成 `PadH + IconRoom`。
+- **坑**：一开始把图标挂在 `ToolStripItem.Image` 上，64px 的图把整条菜单的行高全部撑到 64px
+  （ImageScaling 默认 SizeToFit，且叠在 ShowImageMargin=false 上照样参与排版）。
+  改成 `IosRenderer.Icons`（条目→图 的旁表，只画不排版）后行高恢复。
+- 配图约定：exe 同目录 `icons\<菜单文字>.png`，`MenuSpec.ApplyIcons()` 每次弹菜单前按名字查一遍，
+  带缓存（`_iconCache`），新建目录时写一份 `说明.txt`。
+- **「打开日志」图标**：MDL2 的 `E887` 在 64px 画布上只剩一道弧线（字形被裁），改成自绘记事本——
+  浅蓝页 + 4 条蓝横线 + 右侧深蓝书脊 + 底部米色页边（`note.ps1` 生成 256px 再缩到 64px），
+  与菜单里的扁平蓝色字形同一套色（#2E7BE0 / #C99B5C），22px 下仍能认出是「本子」。
+- **「开机自动启动」图标**：原来用的 `E768` 是播放三角（语义更像「播放」）。改成电源符号（圆环留口 + 竖线）
+  加右下角蓝色 `auto` 胶囊徽标（白描边把徽标和圆环隔开，缩到 22px 不粘连）；64px 以上字母清晰，菜单槽位 22px
+  里字母会糊成一道，但「电源 + 小标签」的轮廓仍可辨。
+- **坑（再记一次，v1.10 已从根上绕开）**：`.ps1` 里只要写中文就必须 **UTF-8 带 BOM**。用编辑器/工具改完会丢 BOM，
+  PowerShell 5.1 按 GBK 读中文注释，某行末尾的乱码字节会变成续行符（反引号），把下一行并进注释，
+  于是 `$startCmd` 未赋值 → `Set-Content : Cannot bind argument to parameter 'Path' because it is null`，
+  而且报错行号和实际内容差三行（因为续行改变计数）。改完一律重存一次 BOM。
+  v1.10 把 `rebuild.ps1` 改成全 ASCII（路径用 `%~dp0` / `%LOCALAPPDATA%` 运行时展开），这条坑对它已经不存在，但其它 .ps1 仍适用。
+
 ---
 
 ## 5. 本次全量 Review 的结论
 
-共做了四轮全量 review（第三轮在 v1.5 发布后，第四轮在 v1.6 这次改动前后）。两轮都是「通读全部源码 + 三份工具源码 + 脚本」，
+共做了五轮全量 review（第三轮在 v1.5 发布后，第四轮在 v1.6 改动前后，第五轮在 v1.10 前，见 §5.6 / §5.7）。每轮都是「通读全部源码 + 三份工具源码 + 脚本」，
 `/warn:4` 编译零警告，改完即重装验证。
 
 ### 5.1 已修复（第一轮）
@@ -343,7 +420,7 @@ v1.3 之后支持在 `launcher.ini` 里写 `dsh=` 指向任意 dsh 命令（很�
 | 1 | 高 | 重启服务可能因端口未释放而启动失败（EADDRINUSE） | `StopHost` 增加 `WaitPortClosed(15000)`，`RestartHost` 不再盲等 600 ms |
 | 2 | 中 | 托盘双击 / 重复实例 / 重启同时触发时可能拉起第二个 dsh web | `StartHost` 增加「已在启动中则忽略」的守卫（加锁判断） |
 | 3 | 中 | 一次操作可能打开两个标签页（状态刷新与双击前后脚各开一次） | `OpenUi` 增加 8 秒内同 URL 去重 |
-| 4 | 低 | `launcher.log` 无限增长 | 超过 1 MB 自动删除重写 |
+| 4 | 低 | `launcher.log` 无限增长 | 超过 1 MB 自动重开（v1.10 改为改名 `launcher.log.1` 保留一份，见 §5.6） |
 | 5 | 低 | 退出时定时器仍可能在跑 | `Quit()` 先 `_timer.Stop()` |
 | 6 | 低 | 只支持 `--port=3080`，不支持 `--port 3080` | 两种写法都支持，并校验 1–65535 |
 
@@ -371,7 +448,7 @@ v1.3 之后支持在 `launcher.ini` 里写 `dsh=` 指向任意 dsh 命令（很�
 | 注册表 Run 项里没有 DshWebLauncher | **正常**：日志显示 13:23:45 开启、13:24:01 又关闭了开机自启 |
 | 托盘图标不在「隐藏图标」折叠区 | 正常：修好后已用 `IsPromoted=1` 固定显示 |
 | 日志里两条一模一样的「打开界面」 | 就是 §5.1 第 3 条，已修 |
-| 启动器日志出现双份 | 设计如此：安装目录 + `%TEMP%` 各写一份，防止其中一处不可写 |
+| 启动器日志出现双份 | 设计如此：状态目录一份 + exe 同目录 `logs\` 一份（仅状态目录不可写时才回退），防止日志丢失 |
 
 ### 5.4 已知限制（可接受，不修）
 
@@ -385,6 +462,8 @@ v1.3 之后支持在 `launcher.ini` 里写 `dsh=` 指向任意 dsh 命令（很�
 7. 服务的 token 若被**外部**重启（在终端里自己跑 `dsh web`）换掉，启动器缓存的地址会过期，
    此时点「打开界面」可能拿到 401 页；在托盘点一次「重启服务」就会刷新。
 8. 图标 16px 下细节有限（鲸鱼 + 状态点只能看个大概），这是 Windows 托盘 16px 的物理限制，不是渲染问题。
+9. **「停止服务 / 重启服务」会短暂卡住界面**（WMI 查询 + 等端口释放，实测 1–2 秒，最坏 15 秒）——已定位，见 §5.7 B1，留给下一轮。
+10. 状态行里的错误摘要超过 24 字会用「…」截断（菜单宽度保护），完整信息看日志。
 
 ---
 
@@ -397,6 +476,86 @@ v1.3 之后支持在 `launcher.ini` 里写 `dsh=` 指向任意 dsh 命令（很�
 | 2 | 没有「退出时连服务一起收」的入口 | 关机前要连点两次（停服务 + 退启动器） | 新增 `退出启动器并停止服务`，带确认框 |
 | 3 | 新条目在服务未运行时与「退出启动器」等价 | 容易误点、以为漏操作 | 跟随停止服务的可用性一起置灰 |
 | 4 | `tools\MenuPreview.cs` 截图抓的是屏幕像素 | 后台窗口压在上面时会把桌面/聊天窗口拍进文档图（已发生过一次隐私泄露） | 背景窗体 `TopMost` + 截图前 `BringToFront/Activate` 并等一帧 |
+
+### 5.6 已修复（第五轮，v1.10：非中断类清理）
+
+本轮按「不碰当前 dsh 进程」的范围改了 12 处，改完 `/warn:4` 零警告；`rebuild.ps1` 重装并用 SHA-256 校验「装上去的就是编出来的」，
+在线的 dsh web（node pid 18284，08:50 启动）全程未中断，端口 3080 与带 token 的页面照常可用。
+
+| # | 类型 | 问题 | 处理 |
+| --- | --- | --- | --- |
+| 1 | bug | 状态行拼异常消息会把菜单撑到屏幕外（实测 378→1771px） | `Refresh_` 里 `_detail` 截到 24 字符再拼 |
+| 2 | bug | 每秒无条件重设 `_ni.Icon`，每次都触发 `NIM_MODIFY` | 先 `if (_ni.Icon != want)` 再赋值 |
+| 3 | bug | 启动超时通知从线程池直接调 `NotifyIcon` | 改 `Post(...)` 封送回 UI 线程 |
+| 4 | bug | UI 线程与线程池并发写日志会抛异常丢行 | `Log.Write` 加锁 + `FileShare.ReadWrite` 追加 |
+| 5 | bug | 日志轮转直接 `File.Delete`，出事现场一起没 | 改名为 `launcher.log.1` 保留一份 |
+| 6 | bug | `IsAutostart` 只看注册表值存在、不看路径 | 比较值与 `Application.ExecutablePath` |
+| 7 | bug | 菜单/定时器里的异常会弹 .NET 错误框、可能退出 | `SetUnhandledExceptionMode(CatchException)` + `ThreadException` 记日志 |
+| 8 | 优化 | `Cfg.Url` 每次访问整份扫 `dsh-web.log` 并写 `url.txt`（8.5KB×200 次 = 152ms） | 按 Length+mtime 缓存扫描结果、`SaveUrl` 去重；实测 ×200 降到 41ms |
+| 9 | 优化 | `RefreshAux` 每次右键全量重建条目（20 模块实测 136ms/次，且弹菜单会调两次） | 按目录内容指纹跳过重建；实测 ×50 从 6816ms 降到 31ms；同时删掉弹菜单时重复的 `ApplyScale` |
+| 10 | 优化 | `PortOpen` 的 `AsyncWaitHandle` 用完没关 | 显式 `Close()`；×20 从 27ms 降到 18ms |
+| 11 | 优化 | 配置/目录创建失败全被 `catch {}` 吞掉 | `LoadIni` / `EnsureIni` / 静态构造的 catch 改为写日志 |
+| 12 | 优化 | `rebuild.ps1`：步骤编号 4/4 与 5/5 混用、固定 `Start-Sleep 4`、复制不校验、安装脚本写死路径 | 统一 [1/5]…[5/5]；改为轮询等待；安装后与运行后都用 SHA-256 校验；`_install.cmd`/`_start.cmd` 改为纯 ASCII + `%~dp0`/`%LOCALAPPDATA%` 运行时展开（脚本里一旦出现非 ASCII 字符直接 throw） |
+
+调试开关：`launcher.ini` 写 `verbose=1` 才会记「菜单已打开」这类高频日志（默认关闭；以前每次右键都是一行，实测几小时就 116 行）。
+
+### 5.7 推迟给后续 agent（会打断当前 dsh 进程，本轮不动）
+
+| # | 严重度 | 问题 | 位置（函数） |
+| --- | --- | --- | --- |
+| B1 | 高 | 停止/重启在 UI 线程跑 WMI（264ms/pid + 403ms 枚举）再 `WaitPortClosed(15s)`，界面冻 1–15 秒 | `Launcher.StopHost` / `RestartHost` / `KillDshHosts` |
+| B2 | 中 | 启动失败时状态卡「启动中」最长 120 秒，双击被重入保护吞掉 | `Launcher.Refresh_` 状态机 / `StartHost` 的 watchdog |
+| B3 | 中 | `KillDshHosts` 启发式不看端口，会误杀别的 `dsh web`（如另开终端 `--port 4000`） | `Launcher.KillDshHosts` 第二段 |
+| B5 | 中 | 非中文 Windows + 中文路径：`Short()` 依赖 8.3 短名，cmd 脚本用 `Encoding.Default` 写 | `Cfg.Short` / `StartHost` 写 `start-dsh-web.cmd` 处 |
+| B6 | 低 | taskkill 失败也 `killed++`，提示的进程数可能不实 | `Launcher.KillDshHosts` 末段 |
+
+修复方向：B1 把 `KillDshHosts` + `WaitPortClosed` 丢线程池、用 `Post` 回 UI 更新状态；B2 把 cmd pid 记下来，watchdog 每 2 秒查 `Process.HasExited`，退出即置 Error 并读日志尾部；
+B3 增加 `--port <Cfg.Port>` 匹配，`host.pid` 存在时不做全量启发式；B5 直接 `ProcessStartInfo` 起 `dsh.cmd`、stdout/stderr 重定向交给 C#，不再生成 cmd 文件。
+
+### 5.8 已修复（第六轮，v1.11：托盘菜单第一次弹出盖住光标）
+
+**现象**：重启启动器后第一次右键托盘图标，菜单从光标上方一直铺到屏幕底部、把鼠标盖住；从第二次起菜单正常落在光标左上角。每次重启都复现“第一次不准、第二次就对”。
+
+**根因**：`NotifyIcon` 弹菜单不走 `ContextMenuStrip.Show(Point)`，而是 `ShowInTaskbar(x, y)`（`NotifyIcon.cs:604-618`），把光标点当成**菜单右下角**锚定。菜单在 `DshMenu.Create` 末尾先按 100% 建好（`ApplyScale(1f)`，`DshMenu.cs:830`），真正的 DPI 缩放放在 `Opening` 里（`DshMenu.cs:818-826`）。第一次弹出时 WinForms 已按 269×378 把位置算完，`Opening` 随后才放大到 380×518；尺寸变化只会让窗口重新夹进屏幕，不会重新以光标为右下角锚定，于是菜单向下长过光标。第二次弹出时尺寸已是 380×518，一次算对。
+
+**复现数据**（临时探针，编译真实 `DshMenu.cs`，模拟托盘点 (1860,1580)，屏幕 2560×1600、工作区高 1528、150%）：
+
+| | 定位时尺寸 | Opening 前 bounds | 放大后 | 含光标 |
+| --- | --- | --- | --- | --- |
+| 第一次（修复前） | 269×378 | (1591,1202) | (1591,1081) 380×518，底边 1599 | 是 |
+| 第二次（修复前） | 380×518 | (1480,1062) | 不变，右下角压在光标上 | 否 |
+
+对照：普通 `Show(Point)`（光标当左上角）两次结果一致，不产生该现象——问题只在 `ShowInTaskbar` 这条托盘专用路径上。
+
+**修法**：新增 `Launcher.PreScaleMenu()`，在启动时和 `_ni.MouseMove` 里各调一次：按当前屏 DPI `ApplyScale` 一次，用 `_menuScale` 守卫只在比例变化时重排（约 1.3ms）。鼠标一进入托盘图标尺寸就已是最终值，右键时锚点一次算对；启动时那次覆盖“鼠标没再动就直接右键”，`Opening` 里的缩放保留作兜底。注意 .NET Framework 4.x 的 `NotifyIcon` **没有** `MouseHover` 事件（编译报 CS1061），只能用 `MouseMove`。
+
+**验证**：重启后连续两次右键，弹出窗口矩形都是 (1452,1064) 380×518，右下角 (1832,1582) 正好压在光标上，两次一致；不移动鼠标直接右键也同样正确（启动预缩放生效）。截图见 `docs\menu-anchor-fix.png`。`rebuild.ps1` 五步通过，pid=28048。
+
+### 5.9 已修复（第七轮，v1.12：辅助功能里的代理，启动即打印模型清单）
+
+**需求**：WorkBuddy 一次只能接一个自定义供应商、模型名要手抄。用户希望从托盘「辅助功能 → 启动代理（opencode-go）」点开后，窗口里直接列出 opencode-go 当前可用的模型，复制名字就能填。
+
+**事实**：opencode.ai 的 Go 模型清单可匿名拉取，只要带一个任意的 `x-opencode-session`：
+`GET https://opencode.ai/inference/go/openai/v1/models` → 32 个 chat 模型，每个模型带
+`id / name / limit.context / modalities.input / cost / go.monthly_usage.go`。
+
+**改动**（都在 `D:\DSH_WorkSpace\Default_WorkSpace\opencode-go-proxy`，不是本仓库）：
+
+- `proxy.mjs`：启动先 `listen` 再同步清单，WorkBuddy 不用等网络；打印「模型名称 / 显示名 / 上下文 / 月额度 / 图片」五列，模型名可直接复制。
+- 同步失败回落到同目录 `models.json` 缓存（上次成功结果），再失败只给默认模型并提示原因；新增 `--list` 只打印清单、不占端口。
+- 清单末尾按 `last-model.txt` 打印最近使用的模型（每次转发时从请求体的 `model` 字段更新）；没有记录就只给示例，不假装知道 WorkBuddy 当前选了哪个。
+- 端口被占用时不再只报一句错：同样把清单打出来（配合 `cmd /k`，窗口不会闪退）。
+- 月额度来自每个模型的 `go.monthly_usage.go`：glm-5.3 $500、deepseek-v4.1-flash $100、多数 $60 / $30 / $15；
+  beam-free / longcat-2.5-free / hy4-flash-free / iceman-contributor-free 为 0 价、不占额度。**不是所有模型共用 $100**。
+- `%LOCALAPPDATA%\DshLauncher\aux\启动代理（opencode-go）.bat` 由 `cmd /c` 改为 `cmd /k`，端口占用或同步失败时窗口留在屏幕上。
+
+**坑**：Node v24.18 + Windows 下，`fetch` 结束后调 `process.exit(0)` 会触发 libuv 断言
+（`src\win\async.c` 第 94 行，退出码 3221226505）；改成 `process.exitCode` 让事件循环自然退出即可。
+
+**验证**：`node proxy.mjs --list` 1339 ms 退出码 0、32 行完整；占用 8787 时打印清单并 exit 1；
+带假 Key 请求 `/v1/models` 转发到上游返回 401（401 来自上游鉴权，说明转发链路正常）。临时测试端口 8799 已确认无残留监听。
+
+**边界**：清单只在代理重启后打印；当前 8787 上运行的若还是旧进程，要先关掉那个窗口再从托盘启动。
 
 ## 6. 已清理的废弃方案
 
@@ -413,7 +572,8 @@ v1.3 之后支持在 `launcher.ini` 里写 `dsh=` 指向任意 dsh 命令（很�
 
 - `docs\` 里 14 张迭代过程的菜单截图（`menu-150`、`menu-final-150`、`menu-nohover-150`、
   `menu-v7×3`、`menu-v8`、`menu-v9×2`、`menu-v10×2`、`menu-v11×2`、`menu-gap-compare`）；
-  只留 4 张：`menu-final.png`、`menu-states.png`、`icon-states.png`、`tray-live.png`；
+  只留 4 张：`menu-final.png`、`menu-states.png`、`icon-states.png`、`tray-live.png`
+  （这是第二轮当时的清单；后续又补了辅助功能、图标与通知的取证图，v1.10 的完整清单见 §3）；
 - `tools\` 里两个一次性探针：`_d.cs/_d.exe`（查 DPI）、`_m.cs/_m.exe`（查菜单几何）；
 - 源码目录下陈旧的 `logs\launcher.log`（日志已统一到 `%LOCALAPPDATA%\DshLauncher\launcher.log`）；
 - `%TEMP%` 里我自己的 65 个临时截图 / 脚本 / `mp.out`、`mp.err`。
@@ -448,9 +608,15 @@ v1.3 之后支持在 `launcher.ini` 里写 `dsh=` 指向任意 dsh 命令（很�
 | 认证 | 裸地址 → **401**；带 token → **303 + Set-Cookie** |
 | 重启后换 token | 重启后打开的是新 token（`vk-uxzix…` → `0ROzzVx…` → `zEfo6w…` 一路都验证过） |
 | 重建不多开标签页 | 15:04:50 重建后日志只有 `=== 进程启动 pid=22684 ===` 与 `启动器已运行（登录自启，静默模式）`，**没有** `打开界面` 行 |
-| 菜单尺寸（150%） | `1.0→202×306`、`1.25→236×370`、`1.5→278×418`、`2.0→350×548`，同比放大、不糊 |
+| 菜单尺寸（150%，v1.6 时） | `1.0→202×306`、`1.25→236×370`、`1.5→278×418`、`2.0→350×548`，同比放大、不糊；v1.10 加图标槽后 150% 下为 **380×518** |
 | 菜单留白（150%，像素测量） | 顶边→胶囊 8px、胶囊→分割线 9px、末条胶囊→底边 9px（同一套 `sepV` 推导） |
 | 编译健康 | `/warn:4` 零警告；`fatal.log` 不存在 |
+| 编译健康（v1.10） | `/warn:4` 零警告；`rebuild.ps1` 装上去的 exe 与编译产物 SHA-256 一致（`98D0838F…`） |
+| 访问缓存（v1.10） | `Cfg.Url` ×200：152ms → **41ms**（8.5KB 日志，按 Length+mtime 缓存） |
+| 模块扫描（v1.10） | `RefreshAux` ×50（20 个模块）：6816ms → **31ms**（目录指纹未变则跳过重建） |
+| 句柄（v1.10） | 200 次 `ApplyScale` + 50 次 `RefreshAux` 后 GDI/USER 8→8，无泄漏；图标 PNG 加载后可删 |
+| 不打断服务（v1.10） | 重装两次只重启启动器：dsh node pid 18284（08:50 启动）不变，3080 通，带 token 页面 HTTP **200 / 47107 字节** |
+| 菜单实拍（v1.10） | 用户截图确认：9 条菜单、行首图标、状态绿球、自启对勾、辅助功能二级菜单均正常；日志无报错 |
 | 便携版（v1.3） | 全新临时目录 + 自定义 `launcher.ini`（port=3999 / 自建 workdir / 假 dsh）实测：日志走完「已启动 dsh web → 端口已就绪」，工作目录自动创建、`host.pid` 正常写入 |
 | 便携版（解压即用） | 从 zip 解压到临时目录直接运行：识别到 3080 已在跑 → 只记「启动器已运行」，不重复拉起、不开标签页；随包 `launcher.ini` 被正确读取 |
 | 打包完整度 | `DSH-Web-启动器-便携版.zip` 54,682 字节，内含 4 个文件（exe 105,984 / ini 614 / 使用说明 2,805 / diagnose.cmd 1,104） |
@@ -458,11 +624,11 @@ v1.3 之后支持在 `launcher.ini` 里写 `dsh=` 指向任意 dsh 命令（很�
 | 诊断脚本 | `diagnose.cmd` 输出含 dsh/node 位置、`npm root -g`、3080 监听行、目录清单、launcher.ini 全文 |
 | 中文路径（v1.4） | 造 `D:\测试区\工作目录` + 中文名假 dsh：老写法（GBK + `chcp 65001`）报 `The system cannot find the path specified`；新写法 `cd` 成功。整机联调日志 `已启动 dsh web → 端口已就绪`，3999 真实监听 |
 | 打包完整度（v1.4） | `DSH-Web-Launcher-portable-v1.4.zip` 55,123 字节，内含 4 个文件（exe 106,496 / ini 614 / 使用说明 3,154 / diagnose.cmd 1,104） |
-| 当前状态 | 启动器 pid 41732（Medium，静默），3080 由 node 监听，托盘鲸鱼 + 绿点，桌面/开始菜单快捷方式指向安装目录 |
+| 当前状态（v1.10） | 启动器 pid 16156（Medium，静默，11:55 启动），dsh node pid 18284（08:50 启动、全程未重启），3080 通，托盘鲸鱼 + 绿点 |
 
 ---
 
-| 菜单（v1.6 定稿） | 150% 下 348×468，7 条：状态行 / 打开界面 / 重启 / 停止 / 自启 / 日志 / 退出 / 退出并停服务；100%–200% 四档同比缩放 |
+| 菜单（v1.10 起） | 150% 下 380×518，9 行（比 v1.6 多「辅助功能▸」与「退出并停止」）；100%–200% 四档同比缩放；行首图标槽 21×缩放 |
 | 停止逻辑（v1.6） | `host.pid` → `cmd=15728`，`CmdLineOf(15728)` = `cmd.exe /c ""…\start-dsh-web.cmd""`，`start-dsh-web`/`dsh` 两个条件均命中 |
 | 文档配图（v1.6） | `docs\menu-final.png`（560×700）与 `docs\menu-states.png`（620×800）由 `MenuPreview.exe` 在纯色渐变背景上生成，**不含任何桌面内容**；预览器已加 `TopMost`，防止再抓到后台窗口 |
 
@@ -494,6 +660,8 @@ C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe /nologo /codepage:65001 
 三个参数少一个都会出问题：`/codepage:65001` 少了界面中文变乱码；`/win32manifest:app.manifest` 少了菜单又被系统位图拉伸（§4.9）；
 `/resource:logo256.png,DshLogo.png` 少了图标退回「蓝底白 D」保底样式（§4.11）。
 
+手动编译只产出 exe；`icons\`、`dsh.ico`、`dsh-toast.png` 需要自己复制到安装目录（`rebuild.ps1` 第 3 步会一起做，并校验 SHA-256）。
+
 **换图标**（想改成别的标）：
 1. 把新图存成 256×256 透明 PNG，覆盖 `logo256.png`；
 2. 跑 `tools\MakeIco.exe logo256.png dsh.ico`（参数是「输入 PNG、输出 ICO」；≤64 用 DIB、128/256 用 PNG 压缩）；
@@ -509,7 +677,7 @@ csc /nologo /codepage:65001 /target:winexe /win32manifest:app.manifest /out:tool
 tools\MenuPreview.exe 1.5 hover          :: 参数：缩放倍数 [run|start|stop|err] [hover]
 ```
 
-**日志位置**：`%LOCALAPPDATA%\DshLauncher\launcher.log`（启动器动作）
+**日志位置**：`%LOCALAPPDATA%\DshLauncher\launcher.log`（启动器动作；超过 1 MB 自动改名为 `launcher.log.1`）
 和 `%LOCALAPPDATA%\DshLauncher\dsh-web.log`（dsh web 输出，**带 token 的地址在最后一行**；
 同一份地址还缓存在 `%LOCALAPPDATA%\DshLauncher\url.txt`）。
 
@@ -522,7 +690,7 @@ tools\MenuPreview.exe 1.5 hover          :: 参数：缩放倍数 [run|start|sto
 （zip 名用纯 ASCII，GitHub 会把中文资产名抹成 `DSH-Web-.-.zip`）。
 
 **排错速查**：托盘没图标 = 完整性标签不是 Medium（§4.5）；菜单发虚 = manifest 没编进去（§4.9）；
-菜单多开标签页 = 重启启动器没带 `--silent`（§4.12）；`rebuild.ps1` 报莫名其妙的错 = 文件没存成带 BOM 的 UTF-8（§4.13）；
+菜单多开标签页 = 重启启动器没带 `--silent`（§4.12）；`rebuild.ps1` 报莫名其妙的错 = 脚本里混了中文却丢了 BOM（§4.13；v1.10 起该脚本已全 ASCII，正常不会再犯）；
 中文用户名下「系统找不到指定的路径」= 批处理里混了 GBK 与 `chcp 65001`，见 §4.15（v1.4 已修）。
 
 ---
@@ -540,3 +708,5 @@ tools\MenuPreview.exe 1.5 hover          :: 参数：缩放倍数 [run|start|sto
 6. 若真要分发给不熟的人，下一步可以做 `DshLauncher-Setup.exe`：自动装到 `%LOCALAPPDATA%\Programs`、
    用计划任务打 Medium 标签、建快捷方式与自启项。便携版在**全新机器**上没有 Low 标签问题（zip 不带标签），
    只有「在本机这个 DSH 会话里生成的 exe」才会带标签。
+7. **§5.7 的 5 个推迟项**（停止/重启卡界面、启动失败卡 120 秒、误杀其它 dsh web、中文路径、计数不准）都需要一次
+   「可以打断服务」的窗口才能改和验，建议单独开一轮处理。

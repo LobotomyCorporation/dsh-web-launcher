@@ -29,6 +29,12 @@ namespace DshLauncher
         public static int Port = 3080;
         public static string BaseUrl { get { return "http://127.0.0.1:" + Port.ToString() + "/"; } }
 
+        /// <summary>
+        /// 「辅助功能」模块目录：丢进去的 .bat/.cmd/.exe/.ps1 会自动出现在托盘菜单里。
+        /// 留空 = %LOCALAPPDATA%\DshLauncher\aux；要换位置就改 launcher.ini 的 aux_dir=。
+        /// </summary>
+        public static string AuxDir;
+
         // ---------- 可移植配置：exe 同目录的 launcher.ini ----------
         // 换机器时只改这个文本文件，不用重新编译；不写就按下面的顺序自动探测。
         public static readonly string IniFile = Path.Combine(
@@ -73,7 +79,11 @@ namespace DshLauncher
                     if (key.Length > 0) d[key] = Environment.ExpandEnvironmentVariables(val);
                 }
             }
-            catch { }
+            catch (Exception ex)
+            {
+                // 配置读坏了会静默退回默认值，用户只会觉得「填了没用」，至少留一行现场
+                Log.Write("读取 launcher.ini 失败（按默认值启动）：" + ex.Message);
+            }
             return d;
         }
 
@@ -96,22 +106,29 @@ namespace DshLauncher
                     "# dsh 命令的完整路径（dsh.cmd）。留空 = 自动在 PATH 里找\r\n" +
                     "dsh=\r\n" +
                     "\r\n" +
+                    "# 「辅助功能」模块目录；留空 = %LOCALAPPDATA%\\DshLauncher\\aux\r\n" +
+                    "# 把 .bat/.cmd/.exe/.ps1 丢进去，菜单里就多一条（文件名 = 菜单文字，子文件夹 = 分组）\r\n" +
+                    "aux_dir=\r\n" +
+                    "\r\n" +
                     "# 只有在自动探测失败时才需要填下面两行（node + dsh 的 bin.js）\r\n" +
                     "# node=C:\\Program Files\\nodejs\\node.exe\r\n" +
                     "# bin=%APPDATA%\\npm\\node_modules\\@deepseek-ai\\dsh\\lib\\bin.js\r\n";
                 File.WriteAllText(IniFile, t, new System.Text.UTF8Encoding(false));
             }
-            catch { }
+            catch (Exception ex) { Log.Write("写 launcher.ini 模板失败：" + ex.Message); }
         }
 
         static Cfg()
         {
             int p;
             if (int.TryParse(Ini("port"), out p) && p > 0 && p < 65536) Port = p;
+            string ad = Ini("aux_dir");
+            AuxDir = string.IsNullOrEmpty(ad) ? Path.Combine(StateDir, "aux") : ad;
             string wd = Ini("workdir");
             // 没配就落到「文档\DSH_Workspace」，换台电脑也不用改代码
             WorkDir = string.IsNullOrEmpty(wd) ? DefaultWorkDir : wd;
-            try { Directory.CreateDirectory(WorkDir); } catch { }
+            try { Directory.CreateDirectory(WorkDir); }
+            catch (Exception ex) { Log.Write("创建工作目录失败（" + WorkDir + "）：" + ex.Message); }
         }
 
         /// <summary>换机器时的兜底工作目录：文档\DSH_Workspace。</summary>
@@ -139,7 +156,7 @@ namespace DshLauncher
             get
             {
                 string u = ReadTokenUrl();
-                if (u != null) { Cfg._cachedUrl = u; SaveUrl(u); return u; }
+                if (u != null) { Cfg._cachedUrl = u; SaveUrl(u); return u; }   // SaveUrl 内部已去重
                 string cached = LoadUrl();
                 if (cached != null) { Cfg._cachedUrl = cached; return cached; }
                 return Cfg._cachedUrl != null ? Cfg._cachedUrl : BaseUrl;
@@ -156,9 +173,12 @@ namespace DshLauncher
         /// <summary>
         /// 带 token 的地址另存一份：日志可能被清空/轮转/删除，网址不该因此丢失。
         /// </summary>
+        private static string _savedUrl;
         public static void SaveUrl(string url)
         {
-            try { File.WriteAllText(UrlFile, url, new System.Text.UTF8Encoding(false)); } catch { }
+            // 同一个地址不必每次访问 Url 都写一遍盘
+            if (url == _savedUrl) return;
+            try { File.WriteAllText(UrlFile, url, new System.Text.UTF8Encoding(false)); _savedUrl = url; } catch { }
         }
 
         public static string LoadUrl()
@@ -177,6 +197,7 @@ namespace DshLauncher
         public static void ClearUrl()
         {
             try { if (File.Exists(UrlFile)) File.Delete(UrlFile); } catch { }
+            _savedUrl = null;
         }
 
         /// <summary>
@@ -184,28 +205,45 @@ namespace DshLauncher
         /// 必须用 FileShare.ReadWrite 打开：宿主进程一直占着这个日志文件写入，
         /// 默认的 File.ReadAllLines 会抛“文件正被另一进程使用”。
         /// </summary>
+        private static readonly object _urlLock = new object();
+        private static long _urlLen = -1;
+        private static DateTime _urlStamp;
+        private static string _urlFound;
+        private static bool _urlScanned;
+
         public static string ReadTokenUrl()
         {
             try
             {
                 if (!File.Exists(LogFile)) return null;
-                string found = null;
-                using (FileStream fs = new FileStream(LogFile, FileMode.Open, FileAccess.Read,
-                                                      FileShare.ReadWrite | FileShare.Delete))
-                using (StreamReader sr = new StreamReader(fs, System.Text.Encoding.UTF8))
+                FileInfo fi = new FileInfo(LogFile);
+                lock (_urlLock)
                 {
-                    string line;
-                    while ((line = sr.ReadLine()) != null)
+                    // 日志没变化就直接给上次的结果：这个属性每次打开界面都会读一次，
+                    // 服务跑久了日志到 MB 级时，整份扫一遍要几十毫秒。
+                    if (_urlScanned && fi.Length == _urlLen && fi.LastWriteTimeUtc == _urlStamp) return _urlFound;
+                    string found = null;
+                    using (FileStream fs = new FileStream(LogFile, FileMode.Open, FileAccess.Read,
+                                                          FileShare.ReadWrite | FileShare.Delete))
+                    using (StreamReader sr = new StreamReader(fs, System.Text.Encoding.UTF8))
                     {
-                        int k = line.IndexOf("http://", StringComparison.Ordinal);
-                        if (k < 0) continue;
-                        string u = line.Substring(k).Trim();
-                        if (u.IndexOf("token=", StringComparison.Ordinal) < 0) continue;
-                        if (u.IndexOf(":" + Port.ToString() + "/", StringComparison.Ordinal) < 0) continue;
-                        found = u;
+                        string line;
+                        while ((line = sr.ReadLine()) != null)
+                        {
+                            int k = line.IndexOf("http://", StringComparison.Ordinal);
+                            if (k < 0) continue;
+                            string u = line.Substring(k).Trim();
+                            if (u.IndexOf("token=", StringComparison.Ordinal) < 0) continue;
+                            if (u.IndexOf(":" + Port.ToString() + "/", StringComparison.Ordinal) < 0) continue;
+                            found = u;
+                        }
                     }
+                    _urlLen = fi.Length;
+                    _urlStamp = fi.LastWriteTimeUtc;
+                    _urlFound = found;
+                    _urlScanned = true;
+                    return found;
                 }
-                return found;
             }
             catch { return null; }
         }
@@ -415,24 +453,40 @@ namespace DshLauncher
 
     internal static class Log
     {
-        private const long MaxBytes = 1024 * 1024;   // 超过 1 MB 就重开一份，避免日志无限增长
+        private const long MaxBytes = 1024 * 1024;   // 超过 1 MB 就换一份，避免日志无限增长
+        private static readonly object _gate = new object();
 
         public static void Write(string msg)
         {
             string line = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss") + "  " + msg + Environment.NewLine;
-            // 首选状态目录（和 dsh-web.log、url.txt 放一起，只在这一处）；
-            // 万一那里不可写，再退回到 exe 同目录的 logs。
-            string[] files = new string[] { Cfg.LauncherLog, ExeDirLog };
-            foreach (string f in files)
+            // UI 线程和线程池都会写日志：串行化 + FileShare.ReadWrite，避免并发 Append 抛异常丢行。
+            lock (_gate)
             {
-                try
+                // 首选状态目录（和 dsh-web.log、url.txt 放一起，只在这一处）；
+                // 万一那里不可写，再退回到 exe 同目录的 logs。
+                string[] files = new string[] { Cfg.LauncherLog, ExeDirLog };
+                foreach (string f in files)
                 {
-                    Directory.CreateDirectory(Path.GetDirectoryName(f));
-                    try { if (File.Exists(f) && new FileInfo(f).Length > MaxBytes) File.Delete(f); } catch { }
-                    File.AppendAllText(f, line, new System.Text.UTF8Encoding(true));
-                    return;
+                    try
+                    {
+                        Directory.CreateDirectory(Path.GetDirectoryName(f));
+                        try
+                        {
+                            if (File.Exists(f) && new FileInfo(f).Length > MaxBytes)
+                            {
+                                string bak = f + ".1";
+                                if (File.Exists(bak)) File.Delete(bak);
+                                File.Move(f, bak);      // 留一份上一轮，别把出事的现场直接删掉
+                            }
+                        }
+                        catch { }
+                        using (FileStream fs = new FileStream(f, FileMode.Append, FileAccess.Write, FileShare.ReadWrite))
+                        using (StreamWriter sw = new StreamWriter(fs, new System.Text.UTF8Encoding(false)))
+                            sw.Write(line);
+                        return;
+                    }
+                    catch { }
                 }
-                catch { }
             }
         }
 
@@ -463,6 +517,8 @@ namespace DshLauncher
         private bool _startedByUs;
         private DateTime _lastOpenAt = DateTime.MinValue;
         private string _lastOpenUrl = "";
+        private bool _tokenWarned;
+        private float _menuScale = 1f;   // 菜单已套用的 DPI 比例（Create 里先按 1.0 建）
 
         private Icon _iGray, _iGreen, _iOrange, _iRed;
 
@@ -496,6 +552,7 @@ namespace DshLauncher
             };
 
             DshMenu.Trace = delegate (string msg) { Log.Write(msg); };
+            DshMenu.Verbose = Cfg.Ini("verbose") == "1";   // 菜单开合之类的调试日志默认关，ini 里写 verbose=1 打开
             // 只要用户动了托盘菜单，就说明这次是「有人在用」，静默标记一律作废——
             // 否则开机自启（--silent）起来的实例被点「重启服务」后不会打开页面。
             MenuSpec spec = DshMenu.Create(
@@ -506,6 +563,15 @@ namespace DshLauncher
                 delegate { OpenLog(); },
                 delegate { Quit(); },
                 delegate { QuitAll(); });
+            // 「辅助功能」是模块化的：目录里的脚本自动变成菜单条目，这里只提供「怎么跑」和「目录在哪」
+            EnsureAuxDir();
+            EnsureIconDir();
+            spec.IconDir = Path.Combine(Application.StartupPath, "icons");
+            spec.AuxDir = Cfg.AuxDir;
+            spec.AuxRun = delegate (string path) { RunAuxScript(path); };
+            spec.AuxOpenDir = delegate { OpenAuxDir(); };
+            spec.RefreshAux();
+            spec.ApplyIcons();
             _menu = spec;
             _iStatus = spec.Status;
             _iOpen = spec.Open;
@@ -516,6 +582,9 @@ namespace DshLauncher
             _iQuit = spec.Quit;
             _iQuitAll = spec.QuitAll;
             _ni.ContextMenuStrip = spec.Menu;
+            // 见 PreScaleMenu：鼠标一进入图标就把菜单尺寸算到位，右键弹出时才不会长过光标
+            _ni.MouseMove += delegate { PreScaleMenu(); };
+            PreScaleMenu();   // 启动时先排一次，覆盖“鼠标没再动就直接右键”的情况
             _iAuto.Checked = IsAutostart();
             spec.Menu.Invalidate();
             // 登录自启时不弹气泡：用户没在电脑前，弹了他也看不到，还会盖住右下角
@@ -537,6 +606,25 @@ namespace DshLauncher
             if (!PortOpen()) StartHost();
         }
 
+        /// <summary>
+        /// 鼠标进入托盘图标时，先把菜单按当前屏的 DPI 排好。
+        /// 原因：WinForms 的 NotifyIcon 用 ContextMenuStrip.ShowInTaskbar(光标) 弹菜单，
+        /// 它把光标当菜单右下角锚定；若菜单此刻还是 100% 尺寸、到 Opening 里才放大，
+        /// 定位已按小尺寸算完，放大后只会被夹进屏幕（向下长），刚好盖住光标。
+        /// 预缩放后右键时尺寸已是最终值，锚点一次算对。
+        /// </summary>
+        private void PreScaleMenu()
+        {
+            try
+            {
+                float s = Dpi.CursorScale();
+                if (Math.Abs(s - _menuScale) < 0.001f) return;
+                _menu.ApplyScale(s);
+                _menuScale = s;
+            }
+            catch { }
+        }
+
         // ---------- 状态刷新（UI 线程） ----------
         private void Refresh_()
         {
@@ -552,16 +640,22 @@ namespace DshLauncher
             }
             Color dot;
             string txt;
+            Icon want;
             switch (s)
             {
-                case St.Running: _ni.Icon = _iGreen; txt = "运行中"; dot = Ios.Green; break;
-                case St.Starting: _ni.Icon = _iOrange; txt = "启动中…"; dot = Ios.Orange; break;
-                case St.Error: _ni.Icon = _iRed; txt = "启动失败"; dot = Ios.Red; break;
-                default: _ni.Icon = _iGray; txt = "未运行"; dot = Ios.Gray; break;
+                case St.Running: want = _iGreen; txt = "运行中"; dot = Ios.Green; break;
+                case St.Starting: want = _iOrange; txt = "启动中…"; dot = Ios.Orange; break;
+                case St.Error: want = _iRed; txt = "启动失败"; dot = Ios.Red; break;
+                default: want = _iGray; txt = "未运行"; dot = Ios.Gray; break;
             }
+            // 图标没变就别重设：每次赋值都会触发一次 Shell_NotifyIcon(NIM_MODIFY)
+            if (_ni.Icon != want) _ni.Icon = want;
             string tip = "DSH Web · " + txt;
             if (s == St.Running) tip += " · 端口 " + Cfg.Port;
-            _menu.SetStatus("状态：" + txt + (_detail.Length > 0 && s == St.Error ? "（" + _detail + "）" : ""), dot);
+            // 状态行文字直接进菜单宽度：异常消息太长会把菜单撑到屏幕外，截短再拼
+            string detail = _detail ?? "";
+            if (detail.Length > 24) detail = detail.Substring(0, 24) + "…";
+            _menu.SetStatus("状态：" + txt + (detail.Length > 0 && s == St.Error ? "（" + detail + "）" : ""), dot);
             _iOpen.Enabled = s == St.Running;
             _iStop.Enabled = s == St.Running || s == St.Starting;
             _iQuitAll.Enabled = _iStop.Enabled;   // 服务没在跑时这条等同「退出启动器」，禁用免得误导
@@ -677,7 +771,8 @@ namespace DshLauncher
                 }
                 lock (_lock) { _state = St.Error; _detail = "120 秒未就绪"; }
                 Log.Write("超时：120 秒内端口 " + Cfg.Port + " 未监听，详见 " + Cfg.LogFile);
-                Notify("启动超时", "dsh web 没能在 120 秒内开始监听，点托盘图标看日志。");
+                // 这是线程池线程，封送回 UI 线程再弹气泡
+                Post(delegate { Notify("启动超时", "dsh web 没能在 120 秒内开始监听，点托盘图标看日志。"); });
             });
         }
 
@@ -818,6 +913,17 @@ namespace DshLauncher
         private void OpenUi()
         {
             string url = Cfg.Url;
+            if (url.IndexOf("token=", StringComparison.Ordinal) < 0)
+            {
+                // 读不到带 token 的地址是 dsh 日志格式变了/日志被清了的信号，
+                // 光打开裸地址只会看到 authentication required，先说清楚
+                Log.Write("警告：没在 " + Cfg.LogFile + " 里找到带 token 的地址，将打开裸地址");
+                if (!_tokenWarned)
+                {
+                    _tokenWarned = true;
+                    Notify("没找到登录令牌", "没能从日志里取到带 token 的地址，页面可能会提示 authentication required。\r\n右键 →「打开日志」可复制完整地址。");
+                }
+            }
             // 同一次启动里「状态刷新」和「双击打开」可能前后脚各开一次，只留一个标签页
             if (url == _lastOpenUrl && (DateTime.Now - _lastOpenAt).TotalSeconds < 8)
             {
@@ -845,6 +951,106 @@ namespace DshLauncher
                 Log.Write("打开界面（ShellExecute）" + url);
             }
             catch (Exception ex) { Log.Write("打开浏览器失败：" + ex.Message); }
+        }
+
+        /// <summary>
+        /// 跑「辅助功能」里的一个模块脚本：bat/cmd 走 cmd /c，ps1 走 powershell -File，exe 直接起。
+        /// 一律隐藏窗口、不提权，工作目录设成脚本所在目录（脚本里常用 %~dp0 相对路径）。
+        /// 路径校验沿用现有约定：文件不存在只写日志 + 弹气泡提示，不抛异常、不影响服务状态。
+        /// </summary>
+        private void RunAuxScript(string path)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(path) || !File.Exists(path))
+                {
+                    Log.Write("辅助功能：脚本不存在 " + (path == null ? "(空)" : path));
+                    Notify("找不到脚本", "路径：\r\n" + (string.IsNullOrEmpty(path) ? "(空)" : path));
+                    return;
+                }
+
+                string ext = Path.GetExtension(path).ToLowerInvariant();
+                ProcessStartInfo psi;
+                if (ext == ".ps1")
+                    psi = new ProcessStartInfo("powershell.exe",
+                        "-NoProfile -ExecutionPolicy Bypass -File \"" + path + "\"");
+                else if (ext == ".bat" || ext == ".cmd")
+                    psi = new ProcessStartInfo("cmd.exe", "/c \"" + path + "\"");
+                else
+                    psi = new ProcessStartInfo(path);   // .exe
+
+                psi.UseShellExecute = false;
+                psi.CreateNoWindow = true;                      // 别闪黑框
+                psi.WindowStyle = ProcessWindowStyle.Hidden;
+                psi.WorkingDirectory = Path.GetDirectoryName(path);
+                Process p = Process.Start(psi);
+                Log.Write("辅助功能：已运行 " + path + "（pid " + (p == null ? 0 : p.Id) + "）");
+            }
+            catch (Exception ex)
+            {
+                Log.Write("辅助功能：运行脚本失败 " + ex.Message);
+                Notify("运行脚本失败", ex.Message);
+            }
+        }
+
+        /// <summary>打开「辅助功能」模块目录（第一次点的时候顺手建出来）。</summary>
+        private void OpenAuxDir()
+        {
+            try
+            {
+                Directory.CreateDirectory(Cfg.AuxDir);
+                Process.Start("explorer.exe", "\"" + Cfg.AuxDir + "\"");
+            }
+            catch (Exception ex) { Log.Write("辅助功能：打开模块目录失败 " + ex.Message); }
+        }
+
+        /// <summary>
+        /// 首次运行时把模块目录建好，并放一份说明——别人拿到这个 exe，
+        /// 看说明就知道怎么往菜单里加自己的功能，不用读源码。
+        /// </summary>
+        private static void EnsureAuxDir()
+        {
+            try
+            {
+                Directory.CreateDirectory(Cfg.AuxDir);
+                string readme = Path.Combine(Cfg.AuxDir, "说明.txt");
+                if (File.Exists(readme)) return;
+                File.WriteAllText(readme,
+                    "这里是「辅助功能」模块目录。\r\n\r\n" +
+                    "规则很简单：\r\n" +
+                    "  1. 把 .bat / .cmd / .exe / .ps1 文件丢进这个目录，托盘菜单「辅助功能」里就会多一条；\r\n" +
+                    "  2. 文件名（去掉扩展名）就是菜单文字，按文件名排序；\r\n" +
+                    "  3. 新建子文件夹可以把模块分组，子文件夹会变成下一级菜单；\r\n" +
+                    "  4. 不用重启启动器：每次右键弹出菜单都会重新扫描这个目录。\r\n\r\n" +
+                    "脚本以隐藏窗口运行，工作目录 = 脚本所在目录，不提权。\r\n" +
+                    "删除同名文件即可从菜单里去掉。\r\n",
+                    new System.Text.UTF8Encoding(true));
+            }
+            catch (Exception ex) { Log.Write("辅助功能：准备模块目录失败 " + ex.Message); }
+        }
+
+        /// <summary>
+        /// 图标目录：exe 同目录的 icons\，第一次运行建出来并放一张说明，
+        /// 别人一看就知道怎么给菜单行配图标（文件名 = 菜单文字）。
+        /// </summary>
+        private static void EnsureIconDir()
+        {
+            try
+            {
+                string dir = Path.Combine(Application.StartupPath, "icons");
+                Directory.CreateDirectory(dir);
+                string readme = Path.Combine(dir, "说明.txt");
+                if (File.Exists(readme)) return;
+                File.WriteAllText(readme,
+                    "菜单图标目录。\r\n\r\n" +
+                    "规则：\r\n" +
+                    "  1. 放一张 PNG，文件名就用菜单上的文字，例如「打开 DSH 界面.png」；\r\n" +
+                    "  2. 建议 32×32 或 64×64 透明底，四边留一点余量，显示时按行高自动缩放；\r\n" +
+                    "  3. 「辅助功能」里的模块也能配：文件名 = 脚本名（不带扩展名）；\r\n" +
+                    "  4. 新丢进去的图标下次右键就生效；换掉同名的 PNG 要重启启动器才会重新读。\r\n",
+                    new System.Text.UTF8Encoding(true));
+            }
+            catch (Exception ex) { Log.Write("图标目录准备失败：" + ex.Message); }
         }
 
         private void OpenLog()
@@ -903,7 +1109,11 @@ namespace DshLauncher
                 using (RegistryKey k = Registry.CurrentUser.OpenSubKey(RunKey))
                 {
                     if (k == null) return false;
-                    return k.GetValue(RunName) != null;
+                    string v = k.GetValue(RunName) as string;
+                    if (v == null) return false;
+                    // 只认指向当前这份 exe 的启动项：换过目录/换过机器后旧路径还在，
+                    // 勾选状态会骗人（显示已开启，登录却不启动）
+                    return v.IndexOf(Application.ExecutablePath, StringComparison.OrdinalIgnoreCase) >= 0;
                 }
             }
             catch { return false; }
@@ -943,9 +1153,10 @@ namespace DshLauncher
                 using (TcpClient c = new TcpClient())
                 {
                     IAsyncResult ar = c.BeginConnect(IPAddress.Loopback, Cfg.Port, null, null);
-                    if (!ar.AsyncWaitHandle.WaitOne(700)) return false;
-                    c.EndConnect(ar);
-                    return c.Connected;
+                    bool ok = ar.AsyncWaitHandle.WaitOne(700);
+                    if (ok) c.EndConnect(ar);
+                    ar.AsyncWaitHandle.Close();   // 以前这个等待句柄没人关，每秒一次会一直攒
+                    return ok && c.Connected;
                 }
             }
             catch { return false; }
@@ -1088,6 +1299,40 @@ namespace DshLauncher
 
     internal static class Program
     {
+        // ── 通知身份 ────────────────────────────────────────────────────
+        // 没有 AppUserModelID 的 exe，Windows 通知只能给它配一个系统通用占位图标
+        // （灰底白 D），标题也只能显示 exe 文件名。注册应用身份后，通知标题用
+        // DisplayName、图标用 IconUri 指向的 exe（就是打包进去的鲸鱼），
+        // 跟托盘图标保持一致。
+        private const string AumId = "DSH.Web.Launcher";
+
+        [DllImport("shell32.dll", CharSet = CharSet.Unicode)]
+        private static extern int SetCurrentProcessExplicitAppUserModelID(
+            [MarshalAs(UnmanagedType.LPWStr)] string appId);
+
+        private static void RegisterAppIdentity()
+        {
+            try
+            {
+                // 通知图标：优先用同目录的 dsh-toast.png，退而求其次用 dsh.ico，再退到 exe 自身。
+                // 注意 dsh-toast.png 里存的是**反色**的鲸鱼（金鲸鱼）：Windows 11 会把旧式
+                // 气泡通知的应用图标整体取反（蓝 #4D6BFE ↔ 金 #B29401），预先反色才能显示成蓝色。
+                string png = Path.Combine(Application.StartupPath, "dsh-toast.png");
+                string ico = Path.Combine(Application.StartupPath, "dsh.ico");
+                string icon = File.Exists(png) ? png : (File.Exists(ico) ? ico : Application.ExecutablePath);
+                using (RegistryKey k = Registry.CurrentUser.CreateSubKey(@"Software\Classes\AppUserModelId\" + AumId))
+                {
+                    if (k != null)
+                    {
+                        k.SetValue("DisplayName", "DSH Web 启动器", RegistryValueKind.String);
+                        k.SetValue("IconUri", icon, RegistryValueKind.String);
+                    }
+                }
+                SetCurrentProcessExplicitAppUserModelID(AumId);
+            }
+            catch (Exception ex) { Log.Write("注册通知身份失败：" + ex.Message); }
+        }
+
         private static void Fatal(Exception ex)
         {
             try
@@ -1123,6 +1368,7 @@ namespace DshLauncher
         private static void RunMain(string[] args)
         {
             Log.Write("=== 进程启动 pid=" + Process.GetCurrentProcess().Id + " ===");
+            RegisterAppIdentity();
 
             bool silent = false;
             for (int i = 0; i < args.Length; i++)
@@ -1145,6 +1391,14 @@ namespace DshLauncher
 
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
+
+            // 菜单/定时器回调里的异常不该让整个托盘消失：记下来，继续跑
+            Application.SetUnhandledExceptionMode(UnhandledExceptionMode.CatchException);
+            Application.ThreadException += delegate (object s, ThreadExceptionEventArgs e)
+            {
+                Fatal(e.Exception);
+                Log.Write("界面线程异常（已记录，未退出）：" + e.Exception.Message);
+            };
 
             bool createdEvent;
             EventWaitHandle openEvt = new EventWaitHandle(false, EventResetMode.AutoReset,

@@ -769,8 +769,8 @@ namespace DshLauncher
         private bool _runningSinceTried;        // 已经找过一次启动时间，找不到就不再反复查 WMI
         private int _runToken;                  // 每次停/起自增，防止后台查到的旧启动时间落到新进程上
         private int _startToken;                // 每次启动/停止自增，旧 watchdog 不得改写新状态
-        private bool _restartAfterStop;
-        private bool _quitting;                 // 「退出并停止服务」已确认、正在后台收尾         // 停止完成后是否自动接着启动（菜单“重启服务”）
+        private bool _restartAfterStop;        // 停止完成后是否自动接着启动（菜单“重启服务”）
+        private bool _quitting;                 // 「退出并停止服务」已确认、正在后台收尾
         private string _lastStatusText = "";    // 状态行变长后要重排菜单宽度，先记住上一次的文字
 
         private Icon _iGray, _iGreen, _iOrange, _iRed;
@@ -1114,8 +1114,11 @@ namespace DshLauncher
             int token;
             lock (_lock)
             {
-                // 已经在启动中（托盘双击、重复实例、重启都可能同时触发），别再拉第二个进程
-                if (_state == St.Starting && !PortOpen())
+                // 已经在启动中（托盘双击、重复实例、重启都可能同时触发），别再拉第二个进程。
+                // 这里不做 PortOpen() 探测：连没人监听的端口要耗满超时（实测 700ms），
+                // 锁也跟着持 700ms，UI 线程和 watchdog/停止回调全要排队等这把锁；
+                // 端口是否已通，入口的 PortOpen()（锁外）和 Refresh_ 的缓存已经管了。
+                if (_state == St.Starting)
                 {
                     Log.Write("已在启动中，忽略重复的启动请求");
                     return;
@@ -1126,6 +1129,7 @@ namespace DshLauncher
             }
             _browserOpenedThisRun = false;
             _startedByUs = false;
+            _tokenWarned = false;               // 令牌警告按“每一轮启动”算：新一轮 90 秒等不到时还能再提示一次
             Cfg.ClearUrlCache();
 
             // 两条路：优先直接调 dsh 命令（各种安装方式都通用），退而用 node + bin.js。

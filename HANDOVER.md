@@ -1,14 +1,14 @@
 # DSH Web 启动器 — 交接文档
 
 > 日期：2026-11-20
-> 版本：v1.22（第十六轮补丁：关闭 DSH 后菜单不跟手——端口探测移出 UI 线程；另含启动观测 BootTrace；v1.21/v1.20 记录保留）
+> 版本：v1.23（第十七轮补丁：全面 review 收尾——启动去重不再持锁做 700ms 阻塞探测；令牌警告每轮启动一次；v1.22/v1.21/v1.20 记录保留）
 > 仓库：D:\DSH_WorkSpace\Default_WorkSpace\dsh-launcher
 > 安装位置：%LOCALAPPDATA%\Programs\DshLauncher\
-> 当前运行：启动器 pid=47864（20:46:51 启动，exe `E99CB870…`），dsh web 监听 3080（node pid=10296），host.pid 记录 cmd=16268 / port=3080 / started=2026-11-20T20:39:18
+> 当前运行：启动器 pid=6832（21:20:44 启动，exe `DA9A9080…`），dsh web 监听 3080（node pid=13228），host.pid 记录 cmd=17932 / port=3080 / started=2026-11-20T21:04:14
 
 ## 1. 这次做了什么
 
-v1.18 是全量 review 修复（异步启停、状态机、按端口收进程）；v1.19 补掉 B2「启动失败干等 120 秒」；v1.20 收掉最后一个 UI 冻结点——B1 停止/退出期间的菜单卡顿（QuitAll 后台化、停止中跳过端口探测、防重入，见 §1.6）；v1.21 修「没找到登录令牌」——端口就绪后不再固定等 8 秒，而是等 token 地址落盘并探活通过再开页（见 §1.7）；v1.22 修「DSH 停止后菜单不跟手」——端口探测移到后台缓存，并加入启动观测 BootTrace（见 §1.8、§1.9）。
+v1.18 是全量 review 修复（异步启停、状态机、按端口收进程）；v1.19 补掉 B2「启动失败干等 120 秒」；v1.20 收掉最后一个 UI 冻结点——B1 停止/退出期间的菜单卡顿（QuitAll 后台化、停止中跳过端口探测、防重入，见 §1.6）；v1.21 修「没找到登录令牌」——端口就绪后不再固定等 8 秒，而是等 token 地址落盘并探活通过再开页（见 §1.7）；v1.22 修「DSH 停止后菜单不跟手」——端口探测移到后台缓存，并加入启动观测 BootTrace（见 §1.8、§1.9）；v1.23 全面 review 收尾——启动去重不再持锁做 700 ms 阻塞探测，DshMenu.cs 通读无新发现（见 §1.10）。
 
 ### 1.1 启动失败快失败（B2，v1.19）
 
@@ -79,6 +79,13 @@ v1.18 是全量 review 修复（异步启停、状态机、按端口收进程）
 - 部署：20:46:51 rebuild 通过，sha `E99CB870…`，pid=47864；10 秒采样 CPU 0.000 秒、内存 43.1 MB、11 线程。
 - 实机（2026-11-20 21:04）：停止服务后划动菜单即时加深、无卡顿（用户确认）；随后重启，21:06:33 打开带 token 页面，未弹令牌警告。
 
+### 1.10 全面 review 收尾（v1.23，本轮）
+
+- 背景：用户要求发布前对整个启动器做一次全面 review。通读 `DshLauncher.cs`（2062 行）与 `DshMenu.cs`（960 行）全部源码。
+- 发现并修复 R1：`StartHost` 的「已在启动中」去重检查原来在持 `_lock` 状态下调 `PortOpen()`——锁要跟着 700 ms 阻塞探测一起持有，启动窗口内（约 2 分钟）每次重复触发启动都卡 UI 700 ms，还带一个「端口刚通就再拉第二个进程」的反向竞态。改为 `if (_state == St.Starting)`，锁内零网络调用。
+- 小修 2 处：`_tokenWarned` 每轮启动重置（令牌警告从进程一次改为每轮一次）；`_quitting` 字段行注释错位归位。
+- `DshMenu.cs` 全部 960 行通读后未发现问题；其余子系统核对结论与 PROJECT-REPORT §5.17 一致。
+
 ## 2. 构建与验证
 
 构建命令：
@@ -87,7 +94,14 @@ v1.18 是全量 review 修复（异步启停、状态机、按端口收进程）
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File "D:\DSH_WorkSpace\Default_WorkSpace\dsh-launcher\rebuild.ps1"
 ~~~
 
-本次结果（v1.22）：
+本次结果（v1.23）：
+
+- 2026-11-20 21:20:44 五步全部通过。
+- 源码 exe / 安装 exe 的 SHA-256 均为 DA9A908086B05D7D95D2928A982E4D53E57CFF02402F3CD1F0991532DA041FA5；dist exe 同 hash。
+- 安装进程 pid=6832，Medium 完整性标签正常；dsh web 未动（node pid=13228 监听 3080，host.pid cmd=17932 / started=2026-11-20T21:04:14）。
+- 便携包 v1.23：69,288 字节，4 个文件（exe 135,168 / diagnose.cmd 1,367 / launcher.ini 614 / 使用说明.txt 3,664）。
+
+v1.22 结果（保留）：
 
 - 2026-11-20 20:46:51 五步全部通过。
 - 源码 exe / 安装 exe / dist exe 的 SHA-256 均为 E99CB8702F5DD6D4E84DD0ECF889D20BB58BBEDEC254B9A6074F042118967D04。
@@ -134,17 +148,19 @@ v1.21 已提交，提交信息：
 v1.21：等 ready 再开页（等 token 落盘 + HTTP 探活通过才开浏览器）
 ~~~
 
-v1.22 已提交，提交信息：
+v1.22 已提交（347290c），另有验收记录提交 65691f6（docs：记录 v1.22 停止后菜单手感的实机验收）。
+
+v1.23 本次提交，提交信息：
 
 ~~~text
-v1.22：关闭 DSH 后菜单不跟手修复（端口探测移出 UI 线程）+ 启动观测 BootTrace
+v1.23：全面 review 收尾（启动去重去锁内探测、令牌警告每轮重置）+ 文档与便携包
 ~~~
 
 提交 hash 以 `git log -1` 为准；提交后 `git status --short` 应为空。
 
-本次提交包含：DshLauncher.cs、DshLauncher.exe、PROJECT-REPORT.md、README.md、HANDOVER.md、dist/DSH-Web-启动器/DshLauncher.exe、dist/DSH-Web-Launcher-portable-v1.22.zip。
+本次提交包含：DshLauncher.cs、DshLauncher.exe、PROJECT-REPORT.md、README.md、HANDOVER.md、dist/DSH-Web-启动器/DshLauncher.exe、dist/DSH-Web-Launcher-portable-v1.23.zip。
 
-dist 里旧的 v1.18 / v1.6 zip 保留作历史，未删除。
+dist 里旧的 v1.22 / v1.21 / v1.20 / v1.18 / v1.6 zip 保留作历史，未删除。
 
 ## 4. 已知风险与未完成项
 
@@ -154,7 +170,7 @@ dist 里旧的 v1.18 / v1.6 zip 保留作历史，未删除。
 4. 3080 被非 dsh 程序占用时仍会被当成「服务已运行」；token 被外部终端重启换掉时缓存地址会过期。
 5. 启动失败快失败路径未实机触发；如果 Process 句柄拿到的不是 cmd（例如以后改成直接起 node），需要重新核对 HasExited 语义。
 6. rebuild 的复制重试是概率性保护；若目标目录被 AV 长时间锁定，仍可能失败，日志会指出 hash mismatch。
-7. dist 里保留 v1.18 / v1.20 / v1.21 / v1.6 旧包；如需清理历史产物要先征得用户同意。
+7. dist 里保留 v1.22 / v1.21 / v1.20 / v1.18 / v1.6 旧包；如需清理历史产物要先征得用户同意。
 8. 关闭态点「启动服务」/ 双击托盘仍有一次 700 ms 真实探测（有意保留：避免误判后拉起第二个 node 撞端口）；后台缓存最多晚约 1 秒反映状态变化。
 9. BootTrace 只写日志、5 分钟自停，会让 launcher.log 每轮多几十行；排查启动时 `Select-String 启动观测`。
 
@@ -164,17 +180,17 @@ dist 里旧的 v1.18 / v1.6 zip 保留作历史，未删除。
 2. 在可打断服务的窗口实测：运行中 → 停止 → 重启 → 再停止，确认 UI 不冻结、状态行进入「停止中…」后回「未运行」，并检查 host.pid 清理。
 3. 实测启动失败：临时把 launcher.ini 的 dsh 指向一个立即退出的命令，确认 1 秒级转 Error 且通知带日志尾部；测完恢复配置。
 4. 若要修 B5：改为 ProcessStartInfo 直接起 dsh.cmd，stdout/stderr 重定向，不再生成 cmd 文件。
-5. 版本号规则：v1.22 是当前 exe / 文档 / 便携包版本；README 和 PROJECT-REPORT 已同步。
+5. 版本号规则：v1.23 是当前 exe / 文档 / 便携包版本；README 和 PROJECT-REPORT 已同步。
 
 ## 6. 关键文件
 
-- DshLauncher.cs：托盘、启停、WMI、端口、token 等待与探活、日志尾部、图标合成；2058 行（含 BootTrace 与后台端口探测）。
+- DshLauncher.cs：托盘、启停、WMI、端口、token 等待与探活、日志尾部、图标合成；2062 行（含 BootTrace 与后台端口探测）。
 - DshMenu.cs：iOS 风格自绘菜单、DPI、两行状态、呼吸球；960 行。
 - rebuild.ps1：编译 → 停旧进程 → Medium 副本（含复制重试）→ 静默重启 → hash/标签自检；122 行。
-- PROJECT-REPORT.md：§5.16 是 v1.22 端口探测；§5.15 是 v1.22 BootTrace；§5.14 是 v1.21；§5.13 是 v1.20；§5.11 是 v1.18 review；§5.7 是原推迟项状态。
-- README.md：用户向说明；v1.22 便携包与两行状态说明。
+- PROJECT-REPORT.md：§5.17 是 v1.23 全面 review；§5.16 是 v1.22 端口探测；§5.15 是 v1.22 BootTrace；§5.14 是 v1.21；§5.13 是 v1.20；§5.11 是 v1.18 review；§5.7 是原推迟项状态。
+- README.md：用户向说明；v1.23 便携包与两行状态说明。
 - dist\DSH-Web-启动器\：便携包目录（exe / ini / 使用说明 / diagnose.cmd）。
-- dist\DSH-Web-Launcher-portable-v1.22.zip：69,289 字节，4 个文件（exe 135,168 / diagnose.cmd 1,367 / launcher.ini 614 / 使用说明.txt 3,664）。
+- dist\DSH-Web-Launcher-portable-v1.23.zip：69,288 字节，4 个文件（exe 135,168 / diagnose.cmd 1,367 / launcher.ini 614 / 使用说明.txt 3,664）。
 
 ## 7. 快速自检
 

@@ -548,7 +548,8 @@ namespace DshLauncher
         private bool _runningSinceTried;        // 已经找过一次启动时间，找不到就不再反复查 WMI
         private int _runToken;                  // 每次停/起自增，防止后台查到的旧启动时间落到新进程上
         private int _startToken;                // 每次启动/停止自增，旧 watchdog 不得改写新状态
-        private bool _restartAfterStop;         // 停止完成后是否自动接着启动（菜单“重启服务”）
+        private bool _restartAfterStop;
+        private bool _quitting;                 // 「退出并停止服务」已确认、正在后台收尾         // 停止完成后是否自动接着启动（菜单“重启服务”）
         private string _lastStatusText = "";    // 状态行变长后要重排菜单宽度，先记住上一次的文字
 
         private Icon _iGray, _iGreen, _iOrange, _iRed;
@@ -658,7 +659,11 @@ namespace DshLauncher
         // ---------- 状态刷新（UI 线程） ----------
         private void Refresh_()
         {
-            bool up = PortOpen();
+            // 停止中不再探测端口：停止期间连接可能挂住、单次最多等 700ms，一秒一
+            // tick 正是「停止中菜单一卡一卡」的来源；停止态的判定也不依赖探测结果。
+            St prior;
+            lock (_lock) prior = _state;
+            bool up = prior != St.Stopping && PortOpen();
             St s;
             lock (_lock)
             {
@@ -1420,12 +1425,14 @@ namespace DshLauncher
         /// <summary>关掉 dsh web 再退出启动器。会断开正在看的页面，所以先问一句。</summary>
         private void QuitAll()
         {
+            if (_quitting) return;              // 已在退出流程里：别再弹一次确认框
             _silent = false;
             DialogResult r = MessageBox.Show(
                 "将关闭正在运行的 dsh web（浏览器里那个页面会断开），然后退出启动器。\r\n\r\n确定吗？",
                 "DSH Web 启动器", MessageBoxButtons.YesNo, MessageBoxIcon.Warning,
                 MessageBoxDefaultButton.Button2);
             if (r != DialogResult.Yes) return;
+            _quitting = true;
             Log.Write("退出启动器并停止服务（用户确认）");
             try { _timer.Stop(); } catch { }
             lock (_lock)
@@ -1435,14 +1442,26 @@ namespace DshLauncher
                 _state = St.Stopping;
             }
             try { _menu.SetStatus("状态：关闭中…", Ios.Gray); } catch { }
-            int n;
-            try { n = KillDshHosts(); } catch (Exception ex) { Log.Write("关闭失败：" + ex.Message); n = 0; }
-            try { if (File.Exists(Cfg.PidFile)) File.Delete(Cfg.PidFile); } catch { }
-            Log.Write("已关闭 " + n + " 个 dsh web 进程，启动器退出");
-            try { Cfg.ClearUrlCache(); } catch { }
-            try { WaitPortClosed(8000); } catch { }
-            try { _ni.Visible = false; } catch { }
-            ExitThread();
+            // 杀进程（WMI 枚举）与等端口释放都是慢活：挪到后台线程，UI 线程保持响应，
+            // 退出期间菜单仍可正常弹出，收尾完成后再真正退出。
+            _iOpen.Enabled = false;
+            _iStop.Enabled = false;
+            _iQuitAll.Enabled = false;
+            _iRestart.Enabled = false;
+            ThreadPool.QueueUserWorkItem(delegate
+            {
+                int n = 0;
+                try { n = KillDshHosts(); } catch (Exception ex) { Log.Write("关闭失败：" + ex.Message); }
+                try { if (File.Exists(Cfg.PidFile)) File.Delete(Cfg.PidFile); } catch { }
+                try { Cfg.ClearUrlCache(); } catch { }
+                try { WaitPortClosed(8000); } catch { }
+                Post(delegate
+                {
+                    Log.Write("已关闭 " + n + " 个 dsh web 进程，启动器退出");
+                    try { _ni.Visible = false; } catch { }
+                    ExitThread();
+                });
+            });
         }
 
         // ---------- 开机自启 ----------

@@ -1,14 +1,14 @@
 # DSH Web 启动器 — 交接文档
 
 > 日期：2026-11-20
-> 版本：v1.19（第十三轮补丁：启动失败快失败 + 安装复制重试）
+> 版本：v1.20（第十四轮补丁：B1 停止/退出期间菜单冻结修复；v1.19 记录保留）
 > 仓库：D:\DSH_WorkSpace\Default_WorkSpace\dsh-launcher
 > 安装位置：%LOCALAPPDATA%\Programs\DshLauncher\
-> 当前运行：启动器 pid=1284（11:50:31 启动），dsh web 监听 3080（node pid=28652），host.pid 记录 cmd=13892 / port=3080 / started=2026-11-20T09:40:09
+> 当前运行：启动器 pid=36968（15:40:49 启动），dsh web 监听 3080（node pid=45364），host.pid 记录 cmd=26608 / port=3080 / started=2026-11-20T15:13:35
 
 ## 1. 这次做了什么
 
-v1.18 是全量 review 修复（异步启停、状态机、按端口收进程）；v1.19 在其上补掉 B2「启动失败干等 120 秒」，并修了构建脚本在 exe 被短暂占用时复制失败的问题。
+v1.18 是全量 review 修复（异步启停、状态机、按端口收进程）；v1.19 补掉 B2「启动失败干等 120 秒」；v1.20 收掉最后一个 UI 冻结点——B1 停止/退出期间的菜单卡顿（QuitAll 后台化、停止中跳过端口探测、防重入，见 §1.6）。
 
 ### 1.1 启动失败快失败（B2，v1.19）
 
@@ -47,6 +47,14 @@ v1.18 是全量 review 修复（异步启停、状态机、按端口收进程）
 - diagnose.cmd 从同目录 launcher.ini 读 port=（默认 3080）；根目录补 launcher.ini 模板。
 - 150% 下菜单 380×528，两行「状态：运行中 / 已运行 57 分钟」完整。
 
+### 1.6 B1 停止/退出卡顿（v1.20，本轮）
+
+- QuitAll 慢活移到线程池：置 Stopping + 「关闭中…」后禁用四个菜单项，KillDshHosts、删 host.pid、WaitPortClosed(8000) 后台跑，完成后 Post 回 UI 隐藏图标并 ExitThread；UI 全程可响应。
+- 新增 _quitting 防重入：退出流程已开始时再次点击「退出并停止」不再弹确认框。
+- Refresh_ 在 St.Stopping 时跳过 PortOpen()：停止态判定不依赖探测，去掉停止期间每秒最多 700ms 的卡顿。
+- WMI 全部离开 UI 线程（3 处 ManagementObjectSearcher 此后都只在线程池执行）。
+- 停止/退出路径未实机触发（会断开当前 3080 会话）；以编译 + 代码审查为准，待可打断窗口回归。
+
 ## 2. 构建与验证
 
 构建命令：
@@ -55,7 +63,14 @@ v1.18 是全量 review 修复（异步启停、状态机、按端口收进程）
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File "D:\DSH_WorkSpace\Default_WorkSpace\dsh-launcher\rebuild.ps1"
 ~~~
 
-本次结果：
+本次结果（v1.20）：
+
+- 2026-11-20 15:40:49 五步全部通过。
+- 源码 exe / 安装 exe / dist exe 的 SHA-256 均为 501A252CA1A13119C0D6755C0BE53EDDF5A4DC8AA3C657BC3CD4B5D71EAFB5D3。
+- 安装进程 pid=36968，Medium 完整性标签正常；dsh web 未动（host.pid started=2026-11-20T15:13:35），3080 仍监听。
+- 停止/退出路径未实机触发（会断开当前 3080 会话），以编译 + 代码审查为准。
+
+v1.19 结果（保留）：
 
 - 2026-11-20 11:50:31 五步全部通过。
 - 源码 exe / 安装 exe / dist exe 的 SHA-256 均为：
@@ -69,24 +84,24 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File "D:\DSH_WorkSpace\Defaul
 
 ## 3. 当前 git 状态
 
-上一轮提交：7eb4c73（v1.18：review 修复、文档、便携包）。
+上一轮提交：2284d47（v1.19：启动失败快失败 + 安装复制重试）与 017c6b1（docs：WorkBuddy 测试交接补充）。
 
-v1.19 已提交，提交信息：
+v1.20 已提交，提交信息：
 
 ~~~text
-v1.19：启动失败快失败 + 安装复制重试
+v1.20：B1 停止/退出期间菜单冻结修复（QuitAll 后台化、停止中跳过端口探测、防重入）
 ~~~
 
 当前 `git status --short` 为空（工作区 clean）。提交 hash 以 `git log -1` 为准。
 
-本次提交包含：DshLauncher.cs、DshLauncher.exe、rebuild.ps1、PROJECT-REPORT.md、README.md、HANDOVER.md、dist/DSH-Web-启动器/DshLauncher.exe、dist/DSH-Web-Launcher-portable-v1.19.zip。
+本次提交包含：DshLauncher.cs、DshLauncher.exe、PROJECT-REPORT.md、README.md、HANDOVER.md、dist/DSH-Web-启动器/DshLauncher.exe、dist/DSH-Web-Launcher-portable-v1.20.zip。
 
 dist 里旧的 v1.18 / v1.6 zip 保留作历史，未删除。
 
 ## 4. 已知风险与未完成项
 
 1. B5 未修：非中文 Windows + 中文路径仍依赖 8.3 短名 / ANSI 兜底。
-2. QuitAll 仍在 UI 线程同步收进程并 WaitPortClosed(8000)，最坏约 8 秒。
+2. QuitAll 已在 v1.20 后台化：KillDshHosts/WaitPortClosed 在线程池执行，UI 收尾期间保持响应；停止/退出路径仍未实机触发（会断开当前 3080 会话）。
 3. 3080 被非 dsh 程序占用时仍会被当成「服务已运行」；token 被外部终端重启换掉时缓存地址会过期。
 4. 启动失败快失败路径未实机触发；如果 Process 句柄拿到的不是 cmd（例如以后改成直接起 node），需要重新核对 HasExited 语义。
 5. rebuild 的复制重试是概率性保护；若目标目录被 AV 长时间锁定，仍可能失败，日志会指出 hash mismatch。

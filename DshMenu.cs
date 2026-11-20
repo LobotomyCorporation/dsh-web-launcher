@@ -95,6 +95,12 @@ namespace DshLauncher
             new System.Collections.Generic.Dictionary<ToolStripItem, Image>();
         /// <summary>状态行左侧彩色球的颜色，由 MenuSpec.SetStatus 更新。</summary>
         public Color StatusColor = Ios.Gray;
+        /// <summary>状态行第二行（例如「已运行 5 分钟」）；用更小字号单独绘制，避免把菜单撑宽。</summary>
+        public string StatusSubtext = "";
+        /// <summary>状态行第二行字体；由 MenuSpec.ApplyScale 按 DPI 重建。</summary>
+        public Font StatusSubtextFont;
+        /// <summary>呼吸相位 0..1；由 IosMenu 打开时的计时器推进，驱动状态球外圈伸缩。</summary>
+        public float BreathPhase;
 
         private static int Px(float v, float s)
         {
@@ -159,20 +165,50 @@ namespace DshLauncher
 
             if (!isStatus) DrawIconSlot(e.Graphics, e.Item);
 
-            TextRenderer.DrawText(e.Graphics, e.Text, e.TextFont, box, c,
-                TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding |
-                TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine | TextFormatFlags.EndEllipsis);
+            TextFormatFlags flags = TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding |
+                TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine;
+            if (isStatus && !string.IsNullOrEmpty(StatusSubtext) && !string.IsNullOrEmpty(e.Text))
+            {
+                // 第一行状态、第二行运行时长：竖排后状态行不再需要横向宽度，
+                // 菜单宽度完全由下面的选项行决定。
+                Font sf = StatusSubtextFont ?? e.TextFont;
+                // 这里必须用 Graphics 算行高：静态 TextRenderer.MeasureText 在高 DPI
+                // 的自绘上下文里会给出偏小的值，两行就会叠在一起。
+                int mainH = (int)Math.Ceiling(e.TextFont.GetHeight(e.Graphics));
+                int subH = (int)Math.Ceiling(sf.GetHeight(e.Graphics));
+                int gap = Px(2f, S);
+                int total = mainH + gap + subH;
+                int top = Math.Max(0, (e.Item.Height - total) / 2);
+                TextRenderer.DrawText(e.Graphics, e.Text, e.TextFont,
+                    new Rectangle(left, top, width, mainH), c,
+                    flags | TextFormatFlags.EndEllipsis);
+                TextRenderer.DrawText(e.Graphics, StatusSubtext, sf,
+                    new Rectangle(left, top + mainH + gap, width, subH), c,
+                    flags | TextFormatFlags.EndEllipsis);
+            }
+            else
+            {
+                TextRenderer.DrawText(e.Graphics, e.Text, e.TextFont, box, c,
+                    flags | TextFormatFlags.EndEllipsis);
+            }
 
-            // 状态行左边的彩色球：颜色跟着当前状态走（灰=未运行 / 橙=启动中 / 绿=运行中 / 红=失败）
+            // 状态球：实心圆 + 浅色呼吸外圈。外圈只画一圈细线（不是两层实心圆），
+            // 半径随 BreathPhase 缓慢伸缩，扩张时同时变淡，像呼吸一样。
+            // 圆心与下方图标列的中心对齐，垂直居中于整块状态区（不是第一行）。
             if (isStatus)
             {
-                float d = Math.Max(7f, 8f * S);
-                float cx = left - Px(10f, S);
-                float cy = box.Height / 2f;
+                float d = Math.Max(8f, 12f * S);
+                float cx = PadH + IconRoom / 2f - Px(2f, S);
+                float cy = e.Item.Height / 2f;
                 e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
-                // 先画一层极淡的光晕，再画实心球，看起来像 iOS 的状态灯而不是一个死圆圈
-                using (SolidBrush h = new SolidBrush(Color.FromArgb(46, StatusColor)))
-                    e.Graphics.FillEllipse(h, cx - d * 0.95f, cy - d * 0.95f, d * 1.9f, d * 1.9f);
+
+                float pulse = 0.5f - 0.5f * (float)Math.Cos(BreathPhase * Math.PI * 2.0);
+                float ringD = d * (1.34f + 0.36f * pulse);
+                int ringAlpha = (int)Math.Round(84f - 38f * pulse);
+                float ringWidth = Math.Max(1.2f, 1.4f * S);
+                using (Pen ring = new Pen(Color.FromArgb(ringAlpha, StatusColor), ringWidth))
+                    e.Graphics.DrawEllipse(ring, cx - ringD / 2f, cy - ringD / 2f, ringD, ringD);
+
                 using (SolidBrush b = new SolidBrush(StatusColor))
                     e.Graphics.FillEllipse(b, cx - d / 2f, cy - d / 2f, d, d);
             }
@@ -301,6 +337,12 @@ namespace DshLauncher
         public float S = 1f;
         public int Radius = 10;
 
+        // 呼吸动画只在菜单打开时跑；40ms/帧约 25fps，2.6 秒一个来回。
+        private const int BreathIntervalMs = 40;
+        private const float BreathPeriodMs = 2600f;
+        private readonly Timer _breathTimer;
+        private float _breathPhase;
+
         public IosMenu()
         {
             AutoSize = true;
@@ -317,6 +359,18 @@ namespace DshLauncher
             // 后续强转 IosRenderer 就会抛 InvalidCastException。
             // Win11 由系统画圆角和投影；旧系统退回 WinForms 的方投影
             DropShadowEnabled = Environment.OSVersion.Version.Build < 22000;
+
+            _breathTimer = new Timer();
+            _breathTimer.Interval = BreathIntervalMs;
+            _breathTimer.Tick += delegate
+            {
+                if (!Visible) { _breathTimer.Stop(); return; }
+                _breathPhase += BreathIntervalMs / BreathPeriodMs;
+                if (_breathPhase >= 1f) _breathPhase -= 1f;
+                IosRenderer r = Renderer as IosRenderer;
+                if (r != null) r.BreathPhase = _breathPhase;
+                Invalidate();
+            };
         }
 
         protected override void OnOpened(EventArgs e)
@@ -324,6 +378,29 @@ namespace DshLauncher
             base.OnOpened(e);
             if (DshMenu.Verbose) DshMenu.Trace("菜单已打开（缩放 " + S.ToString("0.00") + "，尺寸 " + Width + "x" + Height + "）");
             StylePopup(this, S);
+            _breathPhase = 0f;
+            IosRenderer r = Renderer as IosRenderer;
+            if (r != null) r.BreathPhase = 0f;
+            _breathTimer.Start();
+        }
+
+        protected override void OnClosed(ToolStripDropDownClosedEventArgs e)
+        {
+            _breathTimer.Stop();
+            _breathPhase = 0f;
+            IosRenderer r = Renderer as IosRenderer;
+            if (r != null) r.BreathPhase = 0f;
+            base.OnClosed(e);
+        }
+
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing)
+            {
+                _breathTimer.Stop();
+                _breathTimer.Dispose();
+            }
+            base.Dispose(disposing);
         }
 
         /// <summary>
@@ -366,6 +443,9 @@ namespace DshLauncher
     {
         public IosMenu Menu;
         public ToolStripMenuItem Status, Open, Restart, Stop, Auto, Log, Quit, QuitAll;
+        /// <summary>状态行第二行（已运行 X）；由 SetStatus 更新，不参与菜单宽度测量。</summary>
+        private string _statusSubtext = "";
+        public string StatusSubtext { get { return _statusSubtext; } }
         /// <summary>顶级项「辅助功能」，挂在「开机自动启动」下面，带二级菜单。</summary>
         public ToolStripMenuItem Aux;
         /// <summary>「辅助功能」二级菜单本体：后续升级类功能统一往这里加（见 AddAuxItem）。</summary>
@@ -457,9 +537,27 @@ namespace DshLauncher
         /// <summary>更新状态行文字 + 左侧彩色球颜色（颜色与托盘图标一个语义）。</summary>
         public void SetStatus(string text, Color dot)
         {
-            if (Status.Text != text) Status.Text = text;
+            SetStatus(text, null, dot);
+        }
+
+        /// <summary>
+        /// 更新状态行；subtext 用更小字号画在主文字下方（例如「已运行 5 分钟」），
+        /// 不参与菜单宽度计算——菜单宽度由下面的选项行决定，状态行只显示信息。
+        /// </summary>
+        public void SetStatus(string text, string subtext, Color dot)
+        {
+            subtext = subtext ?? "";
+            bool textChanged = Status.Text != text;
+            bool subtextChanged = _statusSubtext != subtext;
+            if (textChanged) Status.Text = text;
+            _statusSubtext = subtext;
             IosRenderer r = Menu.Renderer as IosRenderer;
-            if (r != null && r.StatusColor != dot) { r.StatusColor = dot; Menu.Invalidate(); }
+            if (r != null)
+            {
+                r.StatusSubtext = _statusSubtext;
+                if (r.StatusColor != dot) { r.StatusColor = dot; Menu.Invalidate(); }
+                else if (textChanged || subtextChanged) Menu.Invalidate();
+            }
         }
 
         /// <summary>
@@ -614,18 +712,26 @@ namespace DshLauncher
             Menu.Radius = Px(10 * s);
 
             Font f = new Font("Microsoft YaHei UI", Math.Max(11f, 13.5f * s), FontStyle.Regular, GraphicsUnit.Pixel);
-            // 状态行和条目用同一号字：只靠颜色区分层级，尺寸不再缩水
+            // 状态行主文字和条目同字号；第二行「已运行 X」缩到 11px（设计像素），
+            // 竖排后状态行不再成为菜单里最宽的一行。
+            Font sf = new Font("Microsoft YaHei UI", Math.Max(9f, 11f * s), FontStyle.Regular, GraphicsUnit.Pixel);
             Font old = _font;
+            Font oldSub = r != null ? r.StatusSubtextFont : null;
             _font = f;
 
             int padH = Px(16 * s);          // 左右留白（关掉图片栏后靠它撑出呼吸感）
             int padV = Px(7 * s);
-            int dotRoom = Px(20 * s);        // 状态行：彩色球 + 间距
+            int dotRoom = Px(22 * s);        // 状态行：彩色球 + 呼吸外圈 + 间距
             int iconRoom = Px(21 * s);       // 每行行首的图标槽：图标本体 + 到文字的间距
             int checkRoom = Px(20 * s);
             int sepV = Px(3 * s);            // 胶囊↔分割线的距离；菜单上下边框也用同一个值，三处一致
 
-            if (r != null) { r.PadH = padH; r.PadR = padH; r.DotRoom = dotRoom; r.IconRoom = iconRoom; }
+            if (r != null)
+            {
+                r.PadH = padH; r.PadR = padH; r.DotRoom = dotRoom; r.IconRoom = iconRoom;
+                r.StatusSubtext = _statusSubtext;
+                r.StatusSubtextFont = sf;
+            }
 
             foreach (ToolStripItem it in Menu.Items)
             {
@@ -641,9 +747,22 @@ namespace DshLauncher
                 it.AutoSize = true;
             }
             Status.Font = f;
-            // 状态行上下等距 → 文字与圆球在自己那一条里天然居中；
-            // 再让「菜单上边框」与「胶囊到分割线」用同一个 sepV，三处留白就完全一致了。
-            Status.Padding = new Padding(padH + dotRoom, Px(9 * s), padH, Px(9 * s));
+            // 状态行有第二行时整体高一些；上下留白比普通条目略小，两行文字才不松散。
+            Status.Padding = new Padding(padH + dotRoom, Px(6 * s), padH, Px(6 * s));
+            int statusH = 0;
+            if (!string.IsNullOrEmpty(_statusSubtext))
+            {
+                // TextRenderer.MeasureText(..., Size.Empty, ...) 在 144 DPI 会返回偏小的
+                // 15/12，而字体实际行高是 28/23；布局必须用 Graphics 的真实行高，
+                // 否则两行状态会被裁掉或叠在一起。
+                int mainH, subH;
+                using (Graphics g = Menu.CreateGraphics())
+                {
+                    mainH = (int)Math.Ceiling(f.GetHeight(g));
+                    subH = (int)Math.Ceiling(sf.GetHeight(g));
+                }
+                statusH = mainH + subH + Px(2 * s) + Px(12 * s);
+            }
             Auto.Padding = new Padding(padH + iconRoom, padV, padH + checkRoom, padV);
             // 「辅助功能」右侧要留出二级菜单箭头的位置（宽度里先算进去，免得箭头压到文字）
             if (Aux != null) Aux.Padding = new Padding(padH + iconRoom, padV, padH + checkRoom, padV);
@@ -671,16 +790,22 @@ namespace DshLauncher
             {
                 if (it is ToolStripSeparator) continue;
                 if ((it.Tag as string) == "spacer") continue;
+                if (it == Status) continue;   // 状态行第二行不参与菜单宽度
                 Size ps = it.GetPreferredSize(Size.Empty);
                 if (ps.Width > maxW) maxW = ps.Width;
             }
+            // 第一行「状态：运行中」仍要放得下；第二行按同一宽度绘制，超长则省略。
+            Size statusPs = Status.GetPreferredSize(Size.Empty);
+            if (statusPs.Width > maxW) maxW = statusPs.Width;
             foreach (ToolStripItem it in Menu.Items)
             {
                 if (it is ToolStripSeparator) continue;
                 if ((it.Tag as string) == "spacer") { it.Size = new Size(maxW, it.Height); continue; }
                 Size ps = it.GetPreferredSize(Size.Empty);
+                int h = ps.Height;
+                if (it == Status && statusH > 0) h = Math.Max(h, statusH);
                 it.AutoSize = false;
-                it.Size = new Size(maxW, ps.Height);
+                it.Size = new Size(maxW, h);
             }
             Menu.MinimumSize = new Size(maxW + Px(2 * s), 0);
 
@@ -692,6 +817,7 @@ namespace DshLauncher
             Menu.Invalidate();
 
             if (old != null) { try { old.Dispose(); } catch { } }
+            if (oldSub != null) { try { oldSub.Dispose(); } catch { } }
         }
 
         /// <summary>把同一套 DPI 尺寸递归套到下拉菜单（含模块分组的子菜单）上。</summary>

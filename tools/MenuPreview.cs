@@ -48,7 +48,7 @@ internal static class PreviewProgram
             case "start": spec.SetStatus("状态：启动中", Ios.Orange); break;
             case "stop": spec.SetStatus("状态：已停止", Ios.Gray); break;
             case "err": spec.SetStatus("状态：出错", Ios.Red); break;
-            default: spec.SetStatus("状态：运行中", Ios.Green); break;
+            default: spec.SetStatus("状态：运行中", "已运行 57 分钟", Ios.Green); break;
         }
         spec.Auto.Checked = !(state == "start" || state == "err");
 
@@ -110,9 +110,9 @@ internal static class PreviewProgram
             return;
         }
 
-        // 自截：等菜单画完，把背景窗体那块区域抓下来存盘，然后退出
-        // 注意：这里抓的是屏幕像素，所以背景窗体必须真的在最前面——否则抓到的是压在上面的
-        // QQ / 资源管理器窗口（会漏出桌面内容）。先置顶 + 激活，再等一帧。
+        // 自截：等菜单画完，把背景窗体那块区域抓下来存盘，然后退出。
+        // 不要再把背景窗体激活：那会抢走焦点，ContextMenuStrip 收到失活就自动关闭，
+        // 截图里只剩蓝色背景。菜单已经显示在最上面，等它画完直接抓屏幕即可。
         Timer shot = new Timer();
         shot.Interval = 900;
         shot.Tick += delegate
@@ -120,9 +120,6 @@ internal static class PreviewProgram
             shot.Stop();
             try
             {
-                back.TopMost = false;
-                back.BringToFront();
-                back.Activate();
                 Application.DoEvents();
                 System.Threading.Thread.Sleep(220);
                 Rectangle b = back.Bounds;

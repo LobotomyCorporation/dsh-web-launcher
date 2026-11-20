@@ -1,14 +1,14 @@
 # DSH Web 一键启动器 — 项目报告
 
-> 版本：1.12（2026-11-18，第七轮：辅助功能接上 opencode-go 代理——启动即打印模型清单与月额度，见 §5.9）
-> 上一版：1.11（2026-11-16，第六轮：托盘菜单第一次弹出盖住光标——悬停预缩放，见 §5.8）
-> 上上版：1.10（2026-11-16，第五轮：非中断类清理——日志 / 通知 / 自启 / 菜单宽度 / 访问缓存 / 模块扫描 / 构建脚本）
-> 历史：v1.6（2026-10-27，第四轮：新增「退出启动器并停止服务」+ 停止服务改为按记录收进程树，见 §4.17）
+> 版本：1.18（2026-11-20，第十二轮：全量 review 修复——显式 Stopping 状态、启停令牌、停止/重启异步化、按端口收进程，见 §5.11）
+> 上一版：1.17（2026-11-20，第十一轮补丁：状态球与呼吸外圈整体收小——实心球 15→12px，外圈上限 1.95→1.70 倍，见 §5.10）
+> 更早：1.16（2026-11-20，第十轮补丁：状态球恢复浅色外圈，并做成 2.6 秒一张一缩的呼吸特效，见 §5.10）；1.15（2026-11-20，第九轮补丁：状态球改为单圆——去掉光晕，与下方图标列对齐并垂直居中，见 §5.10）；1.14（2026-11-20，第九轮：状态行改两行——第一行状态、第二行已运行时长，菜单宽度回到 380，见 §5.10）；1.13（第八轮：状态行加已运行时长）；1.12（第七轮：辅助功能接上 opencode-go 代理，见 §5.9）；v1.10（第五轮：日志 / 通知 / 自启 / 菜单宽度 / 访问缓存 / 模块扫描 / 构建脚本）；v1.6（第四轮：新增「退出启动器并停止服务」+ 停止服务改为按记录收进程树，见 §4.17）
+> 历史：v1.10（2026-11-16，第五轮：非中断类清理——日志 / 通知 / 自启 / 菜单宽度 / 访问缓存 / 模块扫描 / 构建脚本）；v1.6（2026-10-27，第四轮：新增「退出启动器并停止服务」+ 停止服务改为按记录收进程树，见 §4.17）
 > 位置：`<仓库目录>\`
 > 装机位置：`%LOCALAPPDATA%\Programs\DshLauncher\`
 > 用途：**双击一个图标就能起 dsh web**，不再需要开 cmd / PowerShell 敲命令。
 
-**源码规模**：`DshLauncher.cs` 1409 行 + `DshMenu.cs` 834 行 + `rebuild.ps1` 114 行，`/warn:4` 零警告；
+**源码规模**：`DshLauncher.cs` 1634 行 + `DshMenu.cs` 902 行 + `rebuild.ps1` 114 行，主程序编译通过；
 装机 exe 与源码目录 exe 的 SHA-256 一致（由 `rebuild.ps1` 校验），启动器常驻托盘，3080 由 node 监听。
 
 ---
@@ -76,13 +76,14 @@ VBScript 没有 GUI 子系统、没有真正的单实例保护、错误信息（
 | `DshLauncher.exe` | 编译产物（**注意：低完整性标签，直接双击会没有托盘图标**，见 §4.5） |
 | `launcher.ini` | **运行期配置**（端口 / 工作目录 / dsh 路径 / 模块目录 / verbose），安装目录里那份生效，本目录这份是模板 |
 | `rebuild.ps1` | 五步「编译 → 停旧进程 → 安装带 Medium 标签的副本 → **静默**重启 → 自检」；安装后与启动后都校验 SHA-256，复制失败直接报错 |
-| `dist\` | 便携版成品：`DSH-Web-启动器\`（exe + ini + 使用说明 + diagnose.cmd）与同名 zip（v1.6 时 54 KB；v1.10 只改了源码，未重新打包） |
-| `docs\` | 设计图与证据图：`menu-final.png`（150% 悬停态）、`menu-states.png`（四状态）、`icon-states.png`（图标四态）、`menu-aux-module.png`（辅助功能二级菜单）、`icon-log-notepad.png`、`icon-autostart.png`、`notification-icon-before/after.png`（通知图标取证） |
+| `dist\` | 便携版成品：`DSH-Web-启动器\`（exe + ini + 使用说明 + diagnose.cmd）与 v1.18 便携 zip（66,005 字节，4 个文件）；v1.6 旧包保留作历史 |
+| `docs\` | 设计图与证据图：`menu-final.png`（150% 悬停态）、`menu-states.png`（四状态）、`icon-states.png`（图标四态）、`menu-aux-module.png`（辅助功能二级菜单）、`menu-two-line.png`（两行状态 + 运行时长 + 呼吸外圈）、`icon-log-notepad.png`、`icon-autostart.png`、`notification-icon-before/after.png`（通知图标取证） |
 | `tools\MenuPreview.*` | 单独预览菜单外观（`MenuPreview.exe 1.5 [run\|start\|stop\|err] [hover]`），不属于运行链路 |
 | `tools\MakeIco.*` | 由 `logo256.png` 生成多尺寸 `dsh.ico`（≤64 用 DIB，128/256 用 PNG 压缩） |
 | `tools\IconPreview.*` | 把托盘四状态图标渲染成 `docs\icon-states.png` 供核对 |
 | `README.md` | 面向使用者的简明说明 |
 | `PROJECT-REPORT.md` | 本文件（面向使用者 + 面向后续维护者） |
+| `HANDOVER.md` | 交接文档：v1.18 改动、构建/验证、当前 git 状态、剩余风险与下一轮建议 |
 
 ### 安装目录 `%LOCALAPPDATA%\Programs\DshLauncher\`
 
@@ -462,7 +463,7 @@ v1.3 之后支持在 `launcher.ini` 里写 `dsh=` 指向任意 dsh 命令（很�
 7. 服务的 token 若被**外部**重启（在终端里自己跑 `dsh web`）换掉，启动器缓存的地址会过期，
    此时点「打开界面」可能拿到 401 页；在托盘点一次「重启服务」就会刷新。
 8. 图标 16px 下细节有限（鲸鱼 + 状态点只能看个大概），这是 Windows 托盘 16px 的物理限制，不是渲染问题。
-9. **「停止服务 / 重启服务」会短暂卡住界面**（WMI 查询 + 等端口释放，实测 1–2 秒，最坏 15 秒）——已定位，见 §5.7 B1，留给下一轮。
+9. **「退出并停服务」仍在 UI 线程同步收进程并等端口**（最坏 8 秒）；v1.18 已把「停止服务 / 重启服务」改为异步，退出路径进程随后就结束，暂按可接受处理（见 §5.11）。
 10. 状态行里的错误摘要超过 24 字会用「…」截断（菜单宽度保护），完整信息看日志。
 
 ---
@@ -499,18 +500,15 @@ v1.3 之后支持在 `launcher.ini` 里写 `dsh=` 指向任意 dsh 命令（很�
 
 调试开关：`launcher.ini` 写 `verbose=1` 才会记「菜单已打开」这类高频日志（默认关闭；以前每次右键都是一行，实测几小时就 116 行）。
 
-### 5.7 推迟给后续 agent（会打断当前 dsh 进程，本轮不动）
+### 5.7 原推迟项的处理状态（v1.18）
 
-| # | 严重度 | 问题 | 位置（函数） |
-| --- | --- | --- | --- |
-| B1 | 高 | 停止/重启在 UI 线程跑 WMI（264ms/pid + 403ms 枚举）再 `WaitPortClosed(15s)`，界面冻 1–15 秒 | `Launcher.StopHost` / `RestartHost` / `KillDshHosts` |
-| B2 | 中 | 启动失败时状态卡「启动中」最长 120 秒，双击被重入保护吞掉 | `Launcher.Refresh_` 状态机 / `StartHost` 的 watchdog |
-| B3 | 中 | `KillDshHosts` 启发式不看端口，会误杀别的 `dsh web`（如另开终端 `--port 4000`） | `Launcher.KillDshHosts` 第二段 |
-| B5 | 中 | 非中文 Windows + 中文路径：`Short()` 依赖 8.3 短名，cmd 脚本用 `Encoding.Default` 写 | `Cfg.Short` / `StartHost` 写 `start-dsh-web.cmd` 处 |
-| B6 | 低 | taskkill 失败也 `killed++`，提示的进程数可能不实 | `Launcher.KillDshHosts` 末段 |
-
-修复方向：B1 把 `KillDshHosts` + `WaitPortClosed` 丢线程池、用 `Post` 回 UI 更新状态；B2 把 cmd pid 记下来，watchdog 每 2 秒查 `Process.HasExited`，退出即置 Error 并读日志尾部；
-B3 增加 `--port <Cfg.Port>` 匹配，`host.pid` 存在时不做全量启发式；B5 直接 `ProcessStartInfo` 起 `dsh.cmd`、stdout/stderr 重定向交给 C#，不再生成 cmd 文件。
+| # | 状态 | 处理 |
+| --- | --- | --- |
+| B1 | 已修复 | 停止/重启不再在 UI 线程等：状态先置「停止中…」，`KillDshHosts` + `WaitPortClosed(15s)` 丢线程池，完成后 `Post` 回 UI；`_startToken` 让过期结果失效。`QuitAll` 仍是同步退出路径（最多 8 秒），见 §5.11。 |
+| B2 | 仍未修 | 启动失败仍可能卡「启动中」最长 120 秒；watchdog 现在至少会校验 token，不会再覆盖新的启停状态（见 §5.11 剩余风险）。 |
+| B3 | 已修复 | `host.pid` 的 `port=` 校验 + `CommandLineHasPort` 过滤，只收当前端口的 dsh web，不再误杀另开 4000 的实例。 |
+| B5 | 仍未修 | 非中文 Windows + 中文路径的 8.3 短名/编码边界未动，见 §5.4。 |
+| B6 | 已修复 | taskkill 只有 `WaitForExit(5000)` 且退出码 0 才计数，超时/失败写日志。 |
 
 ### 5.8 已修复（第六轮，v1.11：托盘菜单第一次弹出盖住光标）
 
@@ -556,6 +554,56 @@ B3 增加 `--port <Cfg.Port>` 匹配，`host.pid` 存在时不做全量启发式
 带假 Key 请求 `/v1/models` 转发到上游返回 401（401 来自上游鉴权，说明转发链路正常）。临时测试端口 8799 已确认无残留监听。
 
 **边界**：清单只在代理重启后打印；当前 8787 上运行的若还是旧进程，要先关掉那个窗口再从托盘启动。
+
+### 5.10 新增（第十一轮补丁，v1.17：状态行改两行，已运行时长下移，状态球单圆 + 紧凑呼吸外圈）
+
+**需求**：状态行要显示已运行时长，一眼看出服务跑了多久。第八轮先把它横向拼在状态右侧，结果状态行成了菜单最宽一行，150% 下菜单从 380 撑到 454，下面的选项区显得空；用户要求改成第一行状态、第二行运行时长，并控制菜单宽度。
+
+**实现**（`DshLauncher.cs` / `DshMenu.cs`）：
+
+- 起点优先读 `host.pid` 的 `started=`（启动器自己起的服务时写入，精确到秒）。只有 pid 对应的进程还在、且文件里的 `port=` 与当前端口一致才采用；存活检查用 `Process.GetProcessById` + 进程名含 `cmd`，不查 WMI。
+- `host.pid` 不存在或过期（例如启动器是接管一个已在运行的 `dsh web`）时，异步查 WMI `Win32_Process` 里的 `node.exe`，命令行需含 `dsh\lib\bin.js` 与 `web`，取最新的 `CreationDate`。查询丢线程池，不阻塞 UI；查不到就不显示，不拿「启动器发现它的时间」冒充运行时长。
+- `MenuSpec.SetStatus(状态文字, 第二行文字, 颜色)` 把两者分开：第一行状态用 13.5px × 缩放，第二行「已运行 X」用 11px × 缩放。状态行不再横向拼接，宽度不随运行时长增长。
+- 宽度：`ApplyScale` 计算最宽条目时跳过 Status，只由下面的选项行决定；状态第一行仍参与，保证「状态：运行中」不被截。150% 下菜单宽回到 380（第八轮单行版 454）。
+- 高度：有第二行时 `statusH = mainH + subH + 2px × 缩放 + 12px × 缩放`，Status 上下内边距改为 6px × 缩放。停止服务或启动失败时第二行清空，行高恢复单行。
+- 状态球（v1.15）：去掉原来的光晕，只画一个实心圆（15px × 缩放，150% 约 23px）；圆心 x 与下方图标槽中心一致，y 取 `e.Item.Height / 2`，即整块状态行正中，不再贴在第一行中心。光晕和实心圆叠在一起会被看成两个圈。
+- 状态球（v1.16 初版）：恢复浅色外圈，但只画一个细环围绕实心球，不再叠第二个实心圆（否则又会看成两个圈）。`IosRenderer.BreathPhase`（0..1）由 `IosMenu` 的 40ms 计时器推进，周期 2.6 秒；环直径 `d × (1.45 + 0.50 × pulse)`，透明度 `84 - 38 × pulse`，线宽 `max(1.4px, 1.8px × 缩放)`，扩张时同步变淡。`dotRoom` 从 20px 改为 24px × 缩放。计时器只在菜单打开时启动，`OnClosed` 停止并复位，`Dispose` 释放。
+- 状态球（v1.17）：用户反馈「状态运行图标又太大了」，整体收小：实心球 `15px → 12px × 缩放`（150% 约 18px），外圈直径改为 `d × (1.34 + 0.36 × pulse)`（150% 约 24–31px，最大从 1.95 倍降到 1.70 倍），线宽 `max(1.2px, 1.4px × 缩放)`，`dotRoom` 从 24px 收到 22px × 缩放。呼吸周期、透明度曲线、圆心位置和垂直居中都不变；环仍在球外，150% 下菜单仍是 380×532，不压「状态」文字。
+- 格式不变：`<1 分钟` → 「不到 1 分钟」；`<1 小时` → 「N 分钟」；`<1 天` → 「N 小时」或「N 小时 M 分」；`≥1 天` → 「N 天」或「N 天 M 小时」。
+- 状态文字或第二行变化时，仍在同一次刷新里先 `ApplyScale` 预排，不等 `Opening`；即使宽度不变，行高也可能从单行变两行，晚排会让菜单先按旧高度锚定。
+- 停止服务 / 退出并停服务 / 启动失败时清零；再次启动从新进程的启动时刻重新计时。
+- **坑**：自绘上下文里 `TextRenderer.MeasureText(..., Size.Empty, ...)` 在高 DPI 下返回的 height 明显偏小（144 DPI 实测 15/12px，而字体实际行高 28/23px），两行会叠在一起。改用 `Font.GetHeight(e.Graphics)` 算行高后正常；静态 `TextRenderer.MeasureText` 只在 `ApplyScale` 里做宽度/高度预算。
+
+**验证**：2026-11-20 11:13 重建部署（pid=22576，exe SHA-256 `613FEBA5…C05D1`，源码目录与安装目录一致；`host.pid` 仍记录 `started=2026-11-20T09:40:09`）。实机托盘菜单 380×532，第一行「状态：运行中」，第二行「已运行 1 小时 33 分」；状态球为实心绿球 + 一圈浅绿细环，150% 下核心约 18px、外圈约 24–31px，环未压到「状态」文字；右键菜单右下角仍与光标对齐（菜单 1448,1058，光标 1828,1590）。v1.16 已用两帧截图确认呼吸计时器在跑；v1.17 只改了尺寸常数，计时器和绘制路径未变，本次实机截图确认收小后的样子。`MenuPreview` 在 1.0 / 1.25 / 1.5 / 2.0 下仍为 269×388、318×470、380×532、480×699。截图 `docs\menu-two-line.png`。格式边界 0 / 59 / 60 / 3599 / 3600 / 3660 / 86399 / 86400 / 90000 秒的输出不变；`ReadPidStart` 仍返回 09:40:09。
+
+### 5.11 已修复（第十二轮，v1.18：状态机、启停异步化、按端口收进程）
+
+**背景**：v1.17 交付后做了一次全量 review，重点看 §5.7 里推迟的「停止/重启卡 UI」「启动失败卡 120 秒」「误杀别的 dsh web」，以及并发启停时的状态竞争、watchdog 过期回写、菜单字体泄漏等边界。
+
+**改动**（`DshLauncher.cs` / `DshMenu.cs`）：
+
+- 状态机显式化：`St` 增加 `Stopping`；`Refresh_` 在锁内先判 `Stopping`，停止期间不再被端口探测改回 `Running`。按钮联动：停止/重启/退出在停止中置灰，重启按钮在停止中禁用。
+- 启动令牌 `_startToken`：每次 Start/Stop/QuitAll 自增；watchdog 每轮和落状态前都校验 `token == _startToken && _state == St.Starting`，过期的启动线程不能再把新状态改回 Running/Error。写启动脚本失败、`Process.Start` 返回 null 都立即置 Error 并提示，不干等 120 秒。
+- 停止/重启异步化：`StopHost(ask, restartAfter)` 先在 UI 线程置 `Stopping` 并显示「停止中…」，再把 `KillDshHosts` + 删 `host.pid` + `WaitPortClosed(15000)` 丢线程池；完成后 `Post` 回 UI 校验 token，置 Stopped，再决定是否 `StartHost`。停止期间再次点停止只合并 `_restartAfterStop`，不重复起线程。`RestartHost` 走 `StopHost(false, true)`，UI 不再冻结 15 秒。
+- 按端口收进程：`KillDshHosts` 解析 `host.pid` 的 `cmd=`/`port=`，端口不一致直接忽略；启发式枚举 `node.exe` 时只收 `dsh\lib\bin.js` + `" web"` + `CommandLineHasPort(cl, Cfg.Port)` 的进程。`CommandLineHasPort` 支持 `--port 4000` / `--port=4000`，没有 `--port` 时只对默认 3080 放行。`FindDshStartTime` 同样按端口过滤。
+- taskkill 计数修正：只有 `WaitForExit(5000)` 且 `ExitCode==0` 才 `killed++`，超时/非零退出写日志。
+- 启动开销：有 `dsh.cmd` 时不再求值 `Cfg.NodeExe/DshBin`（会枚举 PATH 和 pnpm 目录），只有回退到 node + bin.js 才扫。
+- 菜单：`ApplyScale` 释放旧的第二行字体，并用 `Graphics.GetHeight` 算两行高度；`MenuPreview` 截图不再抢焦点（改用 `Application.DoEvents` + 短暂等待后 `CopyFromScreen`），避免预览时菜单自动关闭。
+- 便携诊断：`dist\...\diagnose.cmd` 从 `launcher.ini` 读 `port=`（默认 3080），不再写死；根目录补上 `launcher.ini` 模板。
+
+**验证**：
+
+- `rebuild.ps1` 2026-11-20 11:29:57 五步通过；安装目录 exe SHA-256 `7EEF137B…F2455C`，pid=6032，Medium 标签正常；`host.pid` 仍是 `cmd=13892 / port=3080 / started=2026-11-20T09:40:09`。
+- `MenuPreview 1.5` 输出 380×528；两行「状态：运行中 / 已运行 57 分钟」完整，状态球和文字不重叠；旧版 380×532，高度差来自两行高度按 `Graphics` 实测重算。
+- 代码审查覆盖并发启动/停止、旧 watchdog、跨端口进程、taskkill 失败、菜单字体释放等路径；主程序编译通过，preview 的 5 个 CS0649 是预览不链接主程序导致，不是产品代码问题。
+- `diagnose.cmd` 用临时目录实测：`launcher.ini` 写 `port=3999` 时输出 `[4] port 3999` 与 `nothing is listening on 3999`；删掉 ini 时回到默认 3080，并看到当前 `127.0.0.1:3080 LISTENING`。根 `launcher.ini` 与 dist 模板内容一致。
+
+**剩余风险**：
+
+- B2 未修：启动失败（如 dsh 命令存在但立即崩）仍可能显示「启动中」到 120 秒 watchdog 超时；此时点停止可用，但不会自动读日志尾部转 Error。
+- B5 未修：非中文 Windows + 中文路径仍依赖 8.3 短名/ANSI 兜底。
+- `QuitAll`（退出并停服务）仍在 UI 线程同步收进程并等端口，最坏 8 秒；这是退出路径，进程随后结束，暂按可接受处理。
+- 3080 被非 dsh 程序占用时仍会被当成「服务已运行」；token 被外部终端重启换掉时缓存地址会过期（§5.4 第 3、7 条）。
 
 ## 6. 已清理的废弃方案
 
@@ -629,6 +677,8 @@ B3 增加 `--port <Cfg.Port>` 匹配，`host.pid` 存在时不做全量启发式
 ---
 
 | 菜单（v1.10 起） | 150% 下 380×518，9 行（比 v1.6 多「辅助功能▸」与「退出并停止」）；100%–200% 四档同比缩放；行首图标槽 21×缩放 |
+| 菜单（v1.18） | 150% 下 380×528；两行状态「状态：运行中 / 已运行 57 分钟」完整，状态球不压文字；高度按 Graphics 实测重算 |
+| review 修复（v1.18） | 停止/重启异步，UI 不再冻结；`CommandLineHasPort` 只收当前端口；watchdog 校验启动令牌；taskkill 按退出码计数；`diagnose.cmd` 动态端口 |
 | 停止逻辑（v1.6） | `host.pid` → `cmd=15728`，`CmdLineOf(15728)` = `cmd.exe /c ""…\start-dsh-web.cmd""`，`start-dsh-web`/`dsh` 两个条件均命中 |
 | 文档配图（v1.6） | `docs\menu-final.png`（560×700）与 `docs\menu-states.png`（620×800）由 `MenuPreview.exe` 在纯色渐变背景上生成，**不含任何桌面内容**；预览器已加 `TopMost`，防止再抓到后台窗口 |
 

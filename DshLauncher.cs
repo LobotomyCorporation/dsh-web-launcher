@@ -500,13 +500,13 @@ namespace DshLauncher
         }
     }
 
-    internal enum St { Unknown, Stopped, Starting, Running, Error }
+    internal enum St { Unknown, Stopped, Starting, Running, Stopping, Error }
 
     internal sealed class Launcher : ApplicationContext
     {
         private readonly NotifyIcon _ni;
         private readonly MenuSpec _menu;
-        private readonly ToolStripMenuItem _iOpen, _iRestart, _iStop, _iAuto, _iLog, _iQuit, _iStatus, _iQuitAll;
+        private readonly ToolStripMenuItem _iOpen, _iRestart, _iStop, _iAuto, _iLog, _iQuit, _iQuitAll;
         private readonly System.Windows.Forms.Timer _timer;
         private readonly Form _anchor;   // 隐藏宿主窗体，仅用于跨线程封送（不显示）
         private St _state = St.Unknown;
@@ -519,6 +519,12 @@ namespace DshLauncher
         private string _lastOpenUrl = "";
         private bool _tokenWarned;
         private float _menuScale = 1f;   // 菜单已套用的 DPI 比例（Create 里先按 1.0 建）
+        private DateTime? _runningSince;        // 服务这次真正开始运行的时间（本地时间）
+        private bool _runningSinceTried;        // 已经找过一次启动时间，找不到就不再反复查 WMI
+        private int _runToken;                  // 每次停/起自增，防止后台查到的旧启动时间落到新进程上
+        private int _startToken;                // 每次启动/停止自增，旧 watchdog 不得改写新状态
+        private bool _restartAfterStop;         // 停止完成后是否自动接着启动（菜单“重启服务”）
+        private string _lastStatusText = "";    // 状态行变长后要重排菜单宽度，先记住上一次的文字
 
         private Icon _iGray, _iGreen, _iOrange, _iRed;
 
@@ -573,7 +579,6 @@ namespace DshLauncher
             spec.RefreshAux();
             spec.ApplyIcons();
             _menu = spec;
-            _iStatus = spec.Status;
             _iOpen = spec.Open;
             _iRestart = spec.Restart;
             _iStop = spec.Stop;
@@ -632,12 +637,23 @@ namespace DshLauncher
             St s;
             lock (_lock)
             {
-                if (_state == St.Starting && !up) s = St.Starting;
+                if (_state == St.Stopping) s = St.Stopping;
+                else if (_state == St.Starting && !up) s = St.Starting;
                 else if (up) s = St.Running;
                 else if (_state == St.Error) s = St.Error;
                 else s = St.Stopped;
                 _state = s;
             }
+            // 服务一旦停下就把计时清掉；下次再起来重新找启动时间。
+            // Starting 不能清：StartHost 刚把这次的启动时刻放进 _runningSince。
+            if (s == St.Running) EnsureRunningSince();
+            else if (s == St.Stopped || s == St.Error)
+            {
+                if (_runningSince.HasValue || _runningSinceTried) _runToken++;
+                _runningSince = null;
+                _runningSinceTried = false;
+            }
+
             Color dot;
             string txt;
             Icon want;
@@ -645,6 +661,7 @@ namespace DshLauncher
             {
                 case St.Running: want = _iGreen; txt = "运行中"; dot = Ios.Green; break;
                 case St.Starting: want = _iOrange; txt = "启动中…"; dot = Ios.Orange; break;
+                case St.Stopping: want = _iGray; txt = "停止中…"; dot = Ios.Gray; break;
                 case St.Error: want = _iRed; txt = "启动失败"; dot = Ios.Red; break;
                 default: want = _iGray; txt = "未运行"; dot = Ios.Gray; break;
             }
@@ -652,14 +669,27 @@ namespace DshLauncher
             if (_ni.Icon != want) _ni.Icon = want;
             string tip = "DSH Web · " + txt;
             if (s == St.Running) tip += " · 端口 " + Cfg.Port;
-            // 状态行文字直接进菜单宽度：异常消息太长会把菜单撑到屏幕外，截短再拼
+            // 状态行主文字照常截短；「已运行 X」作为第二行交给菜单用小字号画，
+            // 不再把菜单撑宽（否则下面的选项区会显得空）。
             string detail = _detail ?? "";
             if (detail.Length > 24) detail = detail.Substring(0, 24) + "…";
-            _menu.SetStatus("状态：" + txt + (detail.Length > 0 && s == St.Error ? "（" + detail + "）" : ""), dot);
+            string status = "状态：" + txt;
+            string statusSubtext = null;
+            if (s == St.Running && _runningSince.HasValue)
+                statusSubtext = "已运行 " + ElapsedText(DateTime.Now - _runningSince.Value);
+            if (detail.Length > 0 && s == St.Error) status += "（" + detail + "）";
+            _menu.SetStatus(status, statusSubtext, dot);
+            string fullStatus = status + (statusSubtext == null ? "" : " · " + statusSubtext);
+            // 主文字变化时仍要预排宽度（尤其错误详情）；第二行本身不参与宽度。
+            if (fullStatus != _lastStatusText)
+            {
+                _lastStatusText = fullStatus;
+                try { _menu.ApplyScale(_menuScale); } catch { }
+            }
             _iOpen.Enabled = s == St.Running;
             _iStop.Enabled = s == St.Running || s == St.Starting;
             _iQuitAll.Enabled = _iStop.Enabled;   // 服务没在跑时这条等同「退出启动器」，禁用免得误导
-            _iRestart.Enabled = true;
+            _iRestart.Enabled = s != St.Stopping;
             try { if (_ni.Text != tip) _ni.Text = tip.Length > 63 ? tip.Substring(0, 63) : tip; } catch { }
 
             // 只为自己刚拉起来的服务自动开页：服务若是被外部（终端/别的脚本）拉起的，
@@ -681,9 +711,138 @@ namespace DshLauncher
             }
         }
 
+        /// <summary>
+        /// 状态第一次变成「运行中」时找一次服务启动时间。
+        /// 优先读 host.pid 里启动器自己记的 started（启动器重启、服务留着时也能对上）；
+        /// 没有记录（服务是终端/别的脚本拉起的）再按进程创建时间兜底。
+        /// 找不到就不显示时长——宁可不写，也不拿“启动器发现它的时间”冒充运行时长。
+        /// </summary>
+        private void EnsureRunningSince()
+        {
+            if (_runningSince.HasValue || _runningSinceTried) return;
+            _runningSinceTried = true;
+            DateTime? t = ReadPidStart();
+            if (t.HasValue) { SetRunningSince(t.Value); return; }
+
+            // 没有 host.pid 时才走 WMI。实测这台机器上冷启动的 Win32_Process 查询要 ~10 秒，
+            // 直接放在 Refresh_ 里会把启动器卡住十秒，所以丢到线程池，查到再封送回来。
+            int token = _runToken;
+            ThreadPool.QueueUserWorkItem(delegate
+            {
+                DateTime? found = FindDshStartTime();
+                if (!found.HasValue)
+                {
+                    Log.Write("未能确定 dsh web 的启动时间，状态行暂不显示运行时长");
+                    return;
+                }
+                Post(delegate
+                {
+                    if (token != _runToken || _state != St.Running || _runningSince.HasValue) return;
+                    SetRunningSince(found.Value);
+                    Refresh_();   // 立刻把时长补进状态行并重排宽度
+                });
+            });
+        }
+
+        private void SetRunningSince(DateTime t)
+        {
+            DateTime now = DateTime.Now;
+            if (t > now) t = now;   // 系统时间被往回拨时别显示负数
+            _runningSince = t;
+        }
+
+        /// <summary>读 host.pid 的 started=，并确认里面记的 cmd 进程还在（避免 pid 复用读到过期文件）。</summary>
+        private static DateTime? ReadPidStart()
+        {
+            try
+            {
+                if (!File.Exists(Cfg.PidFile)) return null;
+                int pid = 0, port = 0;
+                string started = null;
+                foreach (string raw in File.ReadAllLines(Cfg.PidFile))
+                {
+                    string ln = raw.Trim();
+                    if (ln.StartsWith("cmd=", StringComparison.Ordinal)) int.TryParse(ln.Substring(4).Trim(), out pid);
+                    else if (ln.StartsWith("port=", StringComparison.Ordinal)) int.TryParse(ln.Substring(5).Trim(), out port);
+                    else if (ln.StartsWith("started=", StringComparison.Ordinal)) started = ln.Substring(8).Trim();
+                }
+                if (pid <= 0 || started == null) return null;
+                if (port != 0 && port != Cfg.Port) return null;
+                // 只做快速的存活检查；别用 CmdLineOf 查 WMI，冷启动要 ~10 秒，会把托盘卡住。
+                // host.pid 是我们自己写的，端口又对得上，pid 被复用的概率已经很低。
+                using (Process p = Process.GetProcessById(pid))
+                {
+                    if (p.HasExited) return null;
+                    if (p.ProcessName.IndexOf("cmd", StringComparison.OrdinalIgnoreCase) < 0) return null;
+                }
+                DateTime t;
+                if (!DateTime.TryParseExact(started, "s", System.Globalization.CultureInfo.InvariantCulture,
+                                            System.Globalization.DateTimeStyles.None, out t)) return null;
+                if (t > DateTime.Now.AddMinutes(1)) return null;
+                return t;
+            }
+            catch { return null; }
+        }
+
+        /// <summary>没有 host.pid 时，从正在运行的 dsh web node 进程创建时间兜底。</summary>
+        private static DateTime? FindDshStartTime()
+        {
+            try
+            {
+                DateTime? latest = null;
+                using (ManagementObjectSearcher s = new ManagementObjectSearcher(
+                    "SELECT ProcessId,CreationDate,CommandLine FROM Win32_Process WHERE Name='node.exe'"))
+                {
+                    foreach (ManagementBaseObject o in s.Get())
+                    {
+                        string cl = o["CommandLine"] as string;
+                        if (cl == null) continue;
+                        if (cl.IndexOf(@"dsh\lib\bin.js", StringComparison.OrdinalIgnoreCase) < 0) continue;
+                        if (cl.IndexOf(" web", StringComparison.OrdinalIgnoreCase) < 0) continue;
+                        // 只找当前端口的那一个，否则多端口并存时会显示别的实例的启动时间。
+                        if (!CommandLineHasPort(cl, Cfg.Port)) continue;
+                        string cd = o["CreationDate"] as string;
+                        if (cd == null) continue;
+                        try
+                        {
+                            DateTime t = ManagementDateTimeConverter.ToDateTime(cd);
+                            if (!latest.HasValue || t > latest.Value) latest = t;
+                        }
+                        catch { }
+                    }
+                }
+                return latest;
+            }
+            catch { return null; }
+        }
+
+        /// <summary>把运行时长写成菜单里好读的短句（菜单每秒刷新，只到分钟，不闪秒）。</summary>
+        private static string ElapsedText(TimeSpan t)
+        {
+            if (t < TimeSpan.Zero) t = TimeSpan.Zero;
+            if (t.TotalMinutes < 1) return "不到 1 分钟";
+            if (t.TotalHours < 1) return ((int)t.TotalMinutes).ToString() + " 分钟";
+            if (t.TotalDays < 1)
+            {
+                string h = ((int)t.TotalHours).ToString() + " 小时";
+                return t.Minutes > 0 ? h + " " + t.Minutes.ToString() + " 分" : h;
+            }
+            string d = ((int)t.TotalDays).ToString() + " 天";
+            return t.Hours > 0 ? d + " " + t.Hours.ToString() + " 小时" : d;
+        }
+
         // ---------- 启动主机 ----------
         private void StartHost()
         {
+            // 停止流程可能还在等端口释放；此时用户又点启动，不能和旧 token 抢状态。
+            lock (_lock)
+            {
+                if (_state == St.Stopping)
+                {
+                    Log.Write("正在停止服务，忽略启动请求");
+                    return;
+                }
+            }
             // 端口已经通了就别再拉一个：两个 node 抢同一个端口，第二个会 EADDRINUSE 直接死，
             // 日志里留下一串报错，还会让"重启服务"看起来失败。
             if (PortOpen())
@@ -692,6 +851,7 @@ namespace DshLauncher
                 Refresh_();
                 return;
             }
+            int token;
             lock (_lock)
             {
                 // 已经在启动中（托盘双击、重复实例、重启都可能同时触发），别再拉第二个进程
@@ -700,30 +860,38 @@ namespace DshLauncher
                     Log.Write("已在启动中，忽略重复的启动请求");
                     return;
                 }
+                token = ++_startToken;
                 _state = St.Starting;
                 _detail = "";
             }
             _browserOpenedThisRun = false;
-            _startedByUs = true;
+            _startedByUs = false;
             Cfg.ClearUrlCache();
 
             // 两条路：优先直接调 dsh 命令（各种安装方式都通用），退而用 node + bin.js。
             string dshCmd = Cfg.DshCmd;
-            string node = Cfg.NodeExe, bin = Cfg.DshBin;
+            string node = null, bin = null;
             string runCmd;
             if (dshCmd != null)
                 runCmd = "\"" + dshCmd + "\" web --port " + Cfg.Port + " --no-open";
-            else if (node != null && bin != null)
-                runCmd = "\"" + node + "\" \"" + bin + "\" web --port " + Cfg.Port + " --no-open";
             else
             {
-                lock (_lock) { _state = St.Error; _detail = "找不到 dsh"; }
-                Log.Write("错误：dsh=" + (dshCmd ?? "null") + " node=" + (node ?? "null") + " bin=" + (bin ?? "null"));
-                Notify("启动失败", "没找到 DSH 命令行（dsh）。\n\n" +
-                    "请先安装：npm i -g @deepseek-ai/dsh\n" +
-                    "如果装的是桌面客户端（没有 dsh 命令），这个启动器用不了；\n" +
-                    "也可以在程序同目录的 launcher.ini 里把 dsh= 指到 dsh.cmd 的完整路径。");
-                return;
+                // 只有找不到 dsh 命令时才去扫 node/bin.js：Cfg.NodeExe/DshBin 会枚举 PATH
+                // 和 pnpm 目录，没必要在每条正常启动路径上都付这个开销。
+                node = Cfg.NodeExe;
+                bin = Cfg.DshBin;
+                if (node != null && bin != null)
+                    runCmd = "\"" + node + "\" \"" + bin + "\" web --port " + Cfg.Port + " --no-open";
+                else
+                {
+                    lock (_lock) { _state = St.Error; _detail = "找不到 dsh"; }
+                    Log.Write("错误：dsh=" + (dshCmd ?? "null") + " node=" + (node ?? "null") + " bin=" + (bin ?? "null"));
+                    Notify("启动失败", "没找到 DSH 命令行（dsh）。\n\n" +
+                        "请先安装：npm i -g @deepseek-ai/dsh\n" +
+                        "如果装的是桌面客户端（没有 dsh 命令），这个启动器用不了；\n" +
+                        "也可以在程序同目录的 launcher.ini 里把 dsh= 指到 dsh.cmd 的完整路径。");
+                    return;
+                }
             }
 
             try { if (File.Exists(Cfg.LogFile)) File.Delete(Cfg.LogFile); } catch { }
@@ -739,7 +907,13 @@ namespace DshLauncher
                 "if not defined DSH_HOME set \"DSH_HOME=" + home + "\"\r\n" +
                 Cfg.ShortCmd(runCmd) + " > \"" + logTo + "\" 2>&1\r\n";
             try { File.WriteAllText(Cfg.CmdFile, script, System.Text.Encoding.Default); }
-            catch (Exception ex) { Log.Write("写 cmd 失败：" + ex.Message); }
+            catch (Exception ex)
+            {
+                lock (_lock) { _state = St.Error; _detail = "写启动脚本失败"; }
+                Log.Write("写 cmd 失败：" + ex.Message);
+                Notify("启动失败", "无法写入启动脚本：\n" + Cfg.CmdFile + "\n\n" + ex.Message);
+                return;
+            }
 
             try
             {
@@ -749,9 +923,15 @@ namespace DshLauncher
                 psi.UseShellExecute = false;
                 psi.CreateNoWindow = true;
                 psi.WindowStyle = ProcessWindowStyle.Hidden;
+                DateTime startedAt = DateTime.Now;
                 Process p = Process.Start(psi);
+                if (p == null) throw new Exception("Process.Start 返回空");
+                _startedByUs = true;
+                _runToken++;
+                _runningSince = startedAt;
+                _runningSinceTried = true;
                 Log.Write("已启动 dsh web（cmd pid=" + p.Id + "），等待端口 " + Cfg.Port);
-                try { File.WriteAllText(Cfg.PidFile, "cmd=" + p.Id + "\r\nport=" + Cfg.Port + "\r\nstarted=" + DateTime.Now.ToString("s")); } catch { }
+                try { File.WriteAllText(Cfg.PidFile, "cmd=" + p.Id + "\r\nport=" + Cfg.Port + "\r\nstarted=" + startedAt.ToString("s")); } catch { }
             }
             catch (Exception ex)
             {
@@ -766,10 +946,27 @@ namespace DshLauncher
                 DateTime end = DateTime.Now.AddSeconds(120);
                 while (DateTime.Now < end)
                 {
-                    if (PortOpen()) { lock (_lock) { _state = St.Running; } Log.Write("端口已就绪"); return; }
+                    // 停止/重启已经发生：旧 watchdog 不能再把新状态改成 Running/Error。
+                    lock (_lock) { if (token != _startToken || _state != St.Starting) return; }
+                    if (PortOpen())
+                    {
+                        lock (_lock)
+                        {
+                            if (token != _startToken || _state != St.Starting) return;
+                            _state = St.Running;
+                        }
+                        Log.Write("端口已就绪");
+                        Post(delegate { Refresh_(); });
+                        return;
+                    }
                     Thread.Sleep(700);
                 }
-                lock (_lock) { _state = St.Error; _detail = "120 秒未就绪"; }
+                lock (_lock)
+                {
+                    if (token != _startToken || _state != St.Starting) return;
+                    _state = St.Error;
+                    _detail = "120 秒未就绪";
+                }
                 Log.Write("超时：120 秒内端口 " + Cfg.Port + " 未监听，详见 " + Cfg.LogFile);
                 // 这是线程池线程，封送回 UI 线程再弹气泡
                 Post(delegate { Notify("启动超时", "dsh web 没能在 120 秒内开始监听，点托盘图标看日志。"); });
@@ -779,11 +976,15 @@ namespace DshLauncher
         private void RestartHost()
         {
             Log.Write("请求重启");
-            StopHost(false);   // 内部会等端口真正释放
-            StartHost();
+            StopHost(false, true);   // 停止完成后自动 StartHost，避免 UI 线程等端口
         }
 
         private void StopHost(bool ask)
+        {
+            StopHost(ask, false);
+        }
+
+        private void StopHost(bool ask, bool restartAfter)
         {
             if (ask)
             {
@@ -791,20 +992,69 @@ namespace DshLauncher
                     "DSH 启动器", MessageBoxButtons.YesNo, MessageBoxIcon.Question);
                 if (r != DialogResult.Yes) return;
             }
-            int n = KillDshHosts();
-            Log.Write("已停止 " + n + " 个 dsh web 进程");
-            try { if (File.Exists(Cfg.PidFile)) File.Delete(Cfg.PidFile); } catch { }
+
+            int token;
+            lock (_lock)
+            {
+                if (_state == St.Stopping)
+                {
+                    // 已经在停：只合并“停完是否重启”，不重复起后台线程。
+                    _restartAfterStop |= restartAfter;
+                    return;
+                }
+                token = ++_startToken;
+                _restartAfterStop = restartAfter;
+                _state = St.Stopping;
+                _detail = "";
+            }
             try { _menu.SetStatus("状态：停止中…", Ios.Gray); } catch { }
-            // node 退出到端口真正关闭之间有一段间隙。不等就立刻重启，新进程会因为
-            // EADDRINUSE: address already in use 127.0.0.1:3080 而起不来（实测踩过）。
-            bool closed = WaitPortClosed(15000);
-            Log.Write(closed ? "端口已释放" : "警告：15 秒内端口仍未释放");
-            lock (_lock) { _state = St.Stopped; _detail = ""; }
-            _browserOpenedThisRun = false;
-            _startedByUs = false;
-            Cfg.ClearUrlCache();   // 旧 token 随服务一起失效，别把过期地址留给下次
-            Refresh_();
-            if (ask) Notify("已停止", n > 0 ? "已关闭 " + n + " 个 DSH Web 进程。" : "没有找到正在运行的进程。");
+            Refresh_();   // 按钮/状态立即进入停止态
+
+            ThreadPool.QueueUserWorkItem(delegate
+            {
+                int n = 0;
+                bool closed = false;
+                string err = null;
+                try
+                {
+                    n = KillDshHosts();
+                    try { if (File.Exists(Cfg.PidFile)) File.Delete(Cfg.PidFile); } catch { }
+                    // node 退出到端口真正关闭之间有一段间隙。不等就立刻重启，新进程会因为
+                    // EADDRINUSE: address already in use 127.0.0.1:3080 而起不来（实测踩过）。
+                    closed = WaitPortClosed(15000);
+                }
+                catch (Exception ex) { err = ex.Message; }
+
+                Post(delegate
+                {
+                    lock (_lock)
+                    {
+                        // 停止期间又发生了新的启动/退出：这次停止的结果已经过期。
+                        if (token != _startToken) return;
+                        _state = St.Stopped;
+                        _detail = "";
+                    }
+                    _browserOpenedThisRun = false;
+                    _startedByUs = false;
+                    _runToken++;
+                    _runningSince = null;
+                    _runningSinceTried = false;
+                    Cfg.ClearUrlCache();   // 旧 token 随服务一起失效，别把过期地址留给下次
+                    if (err != null) Log.Write("停止过程出错：" + err);
+                    Log.Write("已停止 " + n + " 个 dsh web 进程");
+                    Log.Write(closed ? "端口已释放" : "警告：15 秒内端口仍未释放");
+                    Refresh_();
+
+                    bool restart;
+                    lock (_lock)
+                    {
+                        restart = _restartAfterStop;
+                        _restartAfterStop = false;
+                    }
+                    if (restart) StartHost();
+                    else if (ask) Notify("已停止", n > 0 ? "已关闭 " + n + " 个 DSH Web 进程。" : "没有找到正在运行的进程。");
+                });
+            });
         }
 
         /// <summary>取某个进程的命令行（拿不到就返回 null）。</summary>
@@ -826,6 +1076,21 @@ namespace DshLauncher
             return null;
         }
 
+        /// <summary>命令行里的 --port 是否指向当前服务端口；dsh web 不写 --port 时默认 3080。</summary>
+        private static bool CommandLineHasPort(string cl, int port)
+        {
+            if (string.IsNullOrEmpty(cl)) return false;
+            System.Text.RegularExpressions.Match m = System.Text.RegularExpressions.Regex.Match(
+                cl, @"(?:^|\s)--port(?:=|\s+)(\d+)(?=\s|$)",
+                System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+            if (m.Success)
+            {
+                int p;
+                return int.TryParse(m.Groups[1].Value, out p) && p == port;
+            }
+            return port == 3080;   // 没写 --port，dsh web 用默认端口
+        }
+
         private static int KillDshHosts()
         {
             int killed = 0;
@@ -837,25 +1102,37 @@ namespace DshLauncher
             {
                 if (File.Exists(Cfg.PidFile))
                 {
+                    int recordedPort = 0;
+                    int cmdPid = 0;
                     foreach (string raw in File.ReadAllLines(Cfg.PidFile))
                     {
                         string ln = raw.Trim();
-                        if (!ln.StartsWith("cmd=", StringComparison.Ordinal)) continue;
-                        int p0;
-                        if (!int.TryParse(ln.Substring(4).Trim(), out p0) || p0 <= 0) continue;
-                        string cl = CmdLineOf(p0);
-                        // 只认我们自己写的那条批处理，避免 pid 复用误杀别人的进程
-                        if (cl == null) continue;
-                        if (cl.IndexOf("start-dsh-web", StringComparison.OrdinalIgnoreCase) < 0 &&
-                            cl.IndexOf("dsh", StringComparison.OrdinalIgnoreCase) < 0) continue;
-                        pids.Add(p0);
-                        Log.Write("按 host.pid 收进程树：" + p0 + " → " + (cl.Length > 90 ? cl.Substring(0, 90) + "…" : cl));
+                        if (ln.StartsWith("cmd=", StringComparison.Ordinal))
+                            int.TryParse(ln.Substring(4).Trim(), out cmdPid);
+                        else if (ln.StartsWith("port=", StringComparison.Ordinal))
+                            int.TryParse(ln.Substring(5).Trim(), out recordedPort);
                     }
+                    // 端口对不上说明 host.pid 是别的端口留下的，不能拿它去杀当前端口的服务。
+                    if (cmdPid > 0 && (recordedPort == 0 || recordedPort == Cfg.Port))
+                    {
+                        string cl = CmdLineOf(cmdPid);
+                        // 只认我们自己写的那条批处理，避免 pid 复用误杀别人的进程
+                        if (cl != null &&
+                            (cl.IndexOf("start-dsh-web", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                             cl.IndexOf("dsh", StringComparison.OrdinalIgnoreCase) >= 0))
+                        {
+                            pids.Add(cmdPid);
+                            Log.Write("按 host.pid 收进程树：" + cmdPid + " → " + (cl.Length > 90 ? cl.Substring(0, 90) + "…" : cl));
+                        }
+                    }
+                    else if (recordedPort != 0 && recordedPort != Cfg.Port)
+                        Log.Write("host.pid 端口 " + recordedPort + " 与当前端口 " + Cfg.Port + " 不符，忽略");
                 }
             }
             catch (Exception ex) { Log.Write("读 host.pid 失败：" + ex.Message); }
 
-            // ② 再按命令行启发式兜底（别的实例起的、或旧版本留下的）
+            // ② 再按命令行启发式兜底（别的实例起的、或旧版本留下的）。必须同时匹配端口，
+            //    否则会把用户在 4000 端口另开的 dsh web 一起杀掉。
             try
             {
                 using (ManagementObjectSearcher s = new ManagementObjectSearcher(
@@ -867,6 +1144,7 @@ namespace DshLauncher
                         if (cl == null) continue;
                         if (cl.IndexOf(@"dsh\lib\bin.js", StringComparison.OrdinalIgnoreCase) < 0) continue;
                         if (cl.IndexOf(" web", StringComparison.OrdinalIgnoreCase) < 0) continue;
+                        if (!CommandLineHasPort(cl, Cfg.Port)) continue;
                         try
                         {
                             int p1 = Convert.ToInt32(o["ProcessId"]);
@@ -877,6 +1155,7 @@ namespace DshLauncher
                 }
             }
             catch (Exception ex) { Log.Write("枚举进程失败：" + ex.Message); }
+
             foreach (int pid in pids)
             {
                 // 用 taskkill /T 连子进程一起收掉，避免遗留 powershell / subprocess 孤儿进程
@@ -886,8 +1165,18 @@ namespace DshLauncher
                     psi.UseShellExecute = false;
                     psi.CreateNoWindow = true;
                     psi.WindowStyle = ProcessWindowStyle.Hidden;
-                    using (Process tk = Process.Start(psi)) { tk.WaitForExit(5000); }
-                    killed++;
+                    using (Process tk = Process.Start(psi))
+                    {
+                        if (tk == null) { Log.Write("无法启动 taskkill：pid=" + pid); continue; }
+                        if (!tk.WaitForExit(5000))
+                        {
+                            try { tk.Kill(); } catch { }
+                            Log.Write("结束进程 " + pid + " 超时");
+                            continue;
+                        }
+                        if (tk.ExitCode == 0) killed++;
+                        else Log.Write("taskkill " + pid + " 返回 " + tk.ExitCode + "（可能已提前退出）");
+                    }
                 }
                 catch (Exception ex) { Log.Write("结束进程 " + pid + " 失败：" + ex.Message); }
             }
@@ -1088,10 +1377,16 @@ namespace DshLauncher
             if (r != DialogResult.Yes) return;
             Log.Write("退出启动器并停止服务（用户确认）");
             try { _timer.Stop(); } catch { }
-            lock (_lock) { _state = St.Stopped; }
+            lock (_lock)
+            {
+                _startToken++;          // 迟到启动的 watchdog 不能再改状态
+                _restartAfterStop = false;
+                _state = St.Stopping;
+            }
             try { _menu.SetStatus("状态：关闭中…", Ios.Gray); } catch { }
             int n;
             try { n = KillDshHosts(); } catch (Exception ex) { Log.Write("关闭失败：" + ex.Message); n = 0; }
+            try { if (File.Exists(Cfg.PidFile)) File.Delete(Cfg.PidFile); } catch { }
             Log.Write("已关闭 " + n + " 个 dsh web 进程，启动器退出");
             try { Cfg.ClearUrlCache(); } catch { }
             try { WaitPortClosed(8000); } catch { }

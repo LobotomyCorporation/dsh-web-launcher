@@ -1,14 +1,14 @@
 # DSH Web 一键启动器 — 项目报告
 
-> 版本：1.21（2026-11-20，第十五轮补丁：P2 等 ready 再开页——等 token 地址落盘 + HTTP 探活通过才开浏览器，不再弹「没找到登录令牌」，见 §5.14）
-> 上一版：1.20（2026-11-20，第十四轮补丁：B1 停止/退出期间菜单冻结——QuitAll 慢活后台化、停止中跳过端口探测、_quitting 防重入，见 §5.13）
+> 版本：1.22（2026-11-20，第十六轮补丁：关闭 DSH 后托盘菜单鼠标划过不跟手——端口探测移出 UI 线程；另含启动耗时观测 BootTrace，见 §5.15、§5.16）
+> 上一版：1.21（2026-11-20，第十五轮补丁：P2 等 ready 再开页——等 token 地址落盘 + HTTP 探活通过才开浏览器，见 §5.14）；再上一版 1.20（第十四轮：B1 停止/退出期间菜单冻结——QuitAll 慢活后台化、停止中跳过端口探测、_quitting 防重入，见 §5.13）
 > 更早：1.17（2026-11-20，第十一轮补丁：状态球与呼吸外圈整体收小，见 §5.10）；1.16（2026-11-20，第十轮补丁：状态球恢复浅色外圈，并做成 2.6 秒一张一缩的呼吸特效，见 §5.10）；1.15（2026-11-20，第九轮补丁：状态球改为单圆——去掉光晕，与下方图标列对齐并垂直居中，见 §5.10）；1.14（2026-11-20，第九轮：状态行改两行——第一行状态、第二行已运行时长，菜单宽度回到 380，见 §5.10）；1.13（第八轮：状态行加已运行时长）；1.12（第七轮：辅助功能接上 opencode-go 代理，见 §5.9）；v1.10（第五轮：日志 / 通知 / 自启 / 菜单宽度 / 访问缓存 / 模块扫描 / 构建脚本）；v1.6（第四轮：新增「退出启动器并停止服务」+ 停止服务改为按记录收进程树，见 §4.17）
 > 历史：v1.10（2026-11-16，第五轮：非中断类清理——日志 / 通知 / 自启 / 菜单宽度 / 访问缓存 / 模块扫描 / 构建脚本）；v1.6（2026-10-27，第四轮：新增「退出启动器并停止服务」+ 停止服务改为按记录收进程树，见 §4.17）
 > 位置：`<仓库目录>\`
 > 装机位置：`%LOCALAPPDATA%\Programs\DshLauncher\`
 > 用途：**双击一个图标就能起 dsh web**，不再需要开 cmd / PowerShell 敲命令。
 
-**源码规模**：`DshLauncher.cs` 1843 行 + `DshMenu.cs` 902 行 + `rebuild.ps1` 122 行，主程序 `/warn:4` 零警告；
+**源码规模**：`DshLauncher.cs` 2058 行 + `DshMenu.cs` 960 行 + `rebuild.ps1` 122 行，主程序 `/warn:4` 零警告；
 装机 exe 与源码目录 exe 的 SHA-256 一致（由 `rebuild.ps1` 校验），启动器常驻托盘，3080 由 node 监听。
 
 ---
@@ -504,7 +504,7 @@ v1.3 之后支持在 `launcher.ini` 里写 `dsh=` 指向任意 dsh 命令（很�
 
 | # | 状态 | 处理 |
 | --- | --- | --- |
-| B1 | 已修复 | 停止/重启不再在 UI 线程等：状态先置「停止中…」，`KillDshHosts` + `WaitPortClosed(15s)` 丢线程池，完成后 `Post` 回 UI；`_startToken` 让过期结果失效。`QuitAll` 于 v1.20 后台化（见 §5.13）。 |
+| B1 | 已修复 | 停止/重启不再在 UI 线程等：状态先置「停止中…」，`KillDshHosts` + `WaitPortClosed(15s)` 丢线程池，完成后 `Post` 回 UI；`_startToken` 让过期结果失效。`QuitAll` 于 v1.20 后台化（见 §5.13）；关闭态（Stopped）的端口探测于 v1.22 移到后台缓存（见 §5.16）。 |
 | B2 | 已修复（v1.19） | `StartHost` 保留 cmd 的 `Process` 句柄；watchdog 每轮查 `HasExited`，cmd 提前退出立即置 Error、读 `dsh-web.log` 尾部并提示，不再空等 120 秒；仍保留 token 校验（见 §5.12）。 |
 | B3 | 已修复 | `host.pid` 的 `port=` 校验 + `CommandLineHasPort` 过滤，只收当前端口的 dsh web，不再误杀另开 4000 的实例。 |
 | B5 | 仍未修 | 非中文 Windows + 中文路径的 8.3 短名/编码边界未动，见 §5.4。 |
@@ -659,6 +659,47 @@ v1.3 之后支持在 `launcher.ini` 里写 `dsh=` 指向任意 dsh 命令（很�
 - 2026-11-20 16:07:58 `rebuild.ps1` 五步通过；源码 exe 与安装 exe（`%LOCALAPPDATA%\Programs\DshLauncher\`）SHA-256 均 `83EF1065…928E5F50`（full: `83EF10651F33CA72CB7CE718F7EA2FCB5C69182D416B031CC2958844928E5F50`），pid=22760，Medium 标签正常；dsh web 未动，3080 仍由 node pid 17976 监听。
 - 反射实测（`Assembly.Load` 后的 `DshLauncher.Cfg`）：`ProbeHttp` 对当前带 token 地址 = `True`（303）、裸地址 = `True`（401，服务在应答）、死端口 3999 = `False`；`WaitReadyUrl(6000)` 在日志已有 token 时 1 ms 返回 `http://127.0.0.1:3080/?token=Hu-tPZd…`。
 - 真实启动路径（端口就绪后还要等 20 秒才有 token）未实机复跑——那会断开当前 3080 会话；以日志时间线 + 反射实测为准，待下次重启回归。
+### 5.15 新增（第十六轮，v1.22：启动耗时观测 BootTrace）
+
+**背景**：排查「启动到底慢在哪一段」需要一条能事后回溯的时间线。v1.22 在启动器里加了一组只读观测：不改变启动逻辑、不阻塞启动、失败只写日志，随版本发布，以后用户说「某次启动特别慢」时可直接取数。
+
+**实现**（`DshLauncher.cs`，`internal static class BootTrace`，约 180 行）：
+
+- `Start(cmdPid)` 起一个线程池循环，500 毫秒一轮、5 分钟自停；先用 WMI 查 `Win32_Process WHERE ParentProcessId=<cmdPid>`，命令行含 `node` 的那个子进程即 dsh web。
+- 每 2 秒记一次该 node 进程的 `TotalProcessorTime` 增量（累计 CPU 秒）；每 4 秒扫 cmd 与 node 的子进程，新出现的记一行（命令行截断 120 字符，`NoteChild` 去重），MCP / sidecar 的启动顺序一目了然。
+- 5 个标记点：`已启动 dsh web（cmd pid=…）`、`日志里已出现 token 地址`、`token 地址探活通过`、`端口就绪，服务已应答`、`打开浏览器`。
+- 全程 try/catch，只写 `launcher.log`；观测自身出异常不影响启动。
+
+**用途**：v1.22 对启动耗时的定性就来自它——某轮从 `启动观测 +2.3s：CPU 累计 1.8s` 到 `+81s：91s`，累计 CPU 几乎线性增长，说明这 80 秒是 CPU 密集（模块解析/编译），不是等网络。
+
+**验证**：
+
+- 反射测试（`%TEMP%\bt-test\Test.exe`，`Assembly.LoadFrom` 安装目录 exe + `GetMethod NonPublic|Static`）确认 cmd→node 发现、CPU 采样、退出识别正常。
+- 部署后每轮启动 `launcher.log` 都有 `启动观测 +Ns` 行（17:23、17:29、20:39 等轮可见），5 分钟后自动停止记录。
+
+### 5.16 已修复（第十六轮，v1.22：关闭 DSH 后托盘菜单鼠标划过不跟手）
+
+**现象**（用户反馈）：DSH 停止后右键托盘，鼠标划过菜单项，胶囊高亮要等一会才加深；服务运行时没有这个现象。
+
+**根因**：
+
+- 实测（`%TEMP%\porttest\PortTest.cs`，与 `PortOpen` 同写法，各 8 次）：连 3080（有服务）0–31 ms；连 3999（无人监听）**710 / 702 / 702 / 706 / 714 / 702 / 703 / 703 ms**——这台机器上「没人监听的回环端口」不会立刻回 RST，只能等满超时。
+- `Refresh_`（1 秒一次 WinForms Timer）第一行就是 `bool up = prior != St.Stopping && PortOpen();`，而 `PortOpen` 是 `Synchronous BeginConnect + WaitOne(700)`。服务停着时 UI 线程每 1000 ms 被占 700 ms，菜单的 `WM_MOUSEMOVE` 与重绘排队，胶囊高亮慢半拍；服务运行时探测 0 ms，所以只在停止后出现。
+- §5.13 只豁免了 `St.Stopping`，`St.Stopped` 仍在 UI 线程里做阻塞探测。
+
+**改动**（`DshLauncher.cs`，约 +50 行）：
+
+- 新增 `private static volatile bool _portUp;` 与 `_portWatchStarted`；`StartPortWatch()` 用 `Interlocked.CompareExchange` 保证只启动一次，线程池死循环：`PortOpenTimed(350)` → 写 `_portUp` → `Thread.Sleep(up ? 900 : 350)`。
+- `PortOpenTimed(int timeoutMs)` 承接原 `PortOpen` 主体（超时参数化）；`public static bool PortOpen() => PortOpenTimed(700);` 保留给启动/停止/`WaitPortClosed` 等必须实时的路径。
+- `Refresh_` 改读 `PortUpCached()`，UI 线程不再有任何阻塞探测；构造函数在 `_timer.Start()` 后启动探测线程。
+- 未改：`StartHost` 入口与双击托盘的 `if (PortOpen())`、`WaitPortClosed`——停止态点击仍有一次 700 ms 真实探测，避免误判「没在跑」后拉起第二个 node 撞端口。
+
+**验证**：
+
+- 2026-11-20 20:46:51 `rebuild.ps1` 五步通过；源码 / 安装 / dist exe SHA-256 均 `E99CB870…118967D04`（full: `E99CB8702F5DD6D4E84DD0ECF889D20BB58BBEDEC254B9A6074F042118967D04`），pid=47864，Medium 标签正常；dsh web 未动（node pid=10296，host.pid cmd=16268 / started=2026-11-20T20:39:18）。
+- 资源实测（10 秒采样）：`TotalProcessorTime` 1.047 → 1.047 秒（0 秒 CPU）、WorkingSet 43.1 MB、11 线程、24 核——后台探测的等待不烧 CPU。
+- 停止态手感待用户下次停服务时回归（会断开当前 3080 会话）。
+
 ## 6. 已清理的废弃方案
 
 ### 6.1 第一轮：VBS 方案 + 调试残留（23 项）
@@ -734,6 +775,8 @@ v1.3 之后支持在 `launcher.ini` 里写 `dsh=` 指向任意 dsh 命令（很�
 | 菜单（v1.18） | 150% 下 380×528；两行状态「状态：运行中 / 已运行 57 分钟」完整，状态球不压文字；高度按 Graphics 实测重算 |
 | review 修复（v1.18） | 停止/重启异步，UI 不再冻结；`CommandLineHasPort` 只收当前端口；watchdog 校验启动令牌；taskkill 按退出码计数；`diagnose.cmd` 动态端口 |
 | 等 ready 再开页（v1.21） | `WaitReadyUrl(90000)` 等 token + `ProbeHttp` 探活；反射实测 token 地址 303 → `True`、裸地址 401 → `True`、死端口 → `False`；日志已有 token 时 1 ms 返回 |
+| 端口探测（v1.22） | 无人监听的本机端口每次等满 700 ms（实测 710/702/702/706/714/702/703/703 ms）；`Refresh_` 改读后台缓存后 UI 线程零阻塞；10 秒采样 CPU **0.000 秒**、内存 43.1 MB、11 线程 |
+| 启动观测（v1.22） | `launcher.log` 每轮出现 `启动观测 +Ns` 与 5 个阶段标记；5 分钟自停；反射测试通过；用于把启动耗时定性为 CPU 密集 |
 | 启动失败（v1.19） | cmd 提前退出约 1 秒内转 Error；通知带 `dsh-web.log` 尾部；`ReadLogTail` 反射测试返回末尾 287 字符；失败路径未实机触发，待可打断服务的窗口 |
 | 停止逻辑（v1.6） | `host.pid` → `cmd=15728`，`CmdLineOf(15728)` = `cmd.exe /c ""…\start-dsh-web.cmd""`，`start-dsh-web`/`dsh` 两个条件均命中 |
 | 文档配图（v1.6） | `docs\menu-final.png`（560×700）与 `docs\menu-states.png`（620×800）由 `MenuPreview.exe` 在纯色渐变背景上生成，**不含任何桌面内容**；预览器已加 `TopMost`，防止再抓到后台窗口 |

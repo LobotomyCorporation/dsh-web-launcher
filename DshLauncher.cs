@@ -283,13 +283,15 @@ namespace DshLauncher
             DateTime end = DateTime.Now.AddMilliseconds(ms);
             string seen = null;
             int probes = 0;
+            bool markedSeen = false;
             while (DateTime.Now < end)
             {
                 if (seen == null) seen = ReadTokenUrl();
                 if (seen != null)
                 {
+                    if (!markedSeen) { markedSeen = true; BootTrace.Mark("日志里已出现 token 地址"); }
                     probes++;
-                    if (ProbeHttp(seen, 2500)) return seen;
+                    if (ProbeHttp(seen, 2500)) { BootTrace.Mark("token 地址探活通过"); return seen; }
                     // 地址已经在日志里了，探活失败多半是探测环境（代理/防火墙）问题，别为此耽误开页
                     if (probes >= 3) return seen;
                 }
@@ -517,6 +519,184 @@ namespace DshLauncher
         }
     }
 
+    /// <summary>
+    /// 启动阶段观测（只读、只写日志）：记录 node 进程何时出现、CPU 每 2 秒涨多少、端口与 token 何时就绪。
+    /// 用途是分清「端口就绪前那几十秒」到底在算还是在等：CPU 涨=在算，几乎不涨=在等网络/IO。
+    /// 任何异常都被吞掉，不影响启动；不想要这份日志时删掉本类及其调用点即可。
+    /// </summary>
+    internal static class BootTrace
+    {
+        private static readonly object _gate = new object();
+        private static int _gen;
+        private static DateTime _t0 = DateTime.Now;
+        private static int _rootPid;
+        private static int _nodePid;
+        private static readonly HashSet<int> _seenPids = new HashSet<int>();
+
+        public static double ElapsedSeconds
+        {
+            get { lock (_gate) { return (DateTime.Now - _t0).TotalSeconds; } }
+        }
+
+        /// <summary>每次拉起 dsh web 时调用：重置计时与已见进程，然后开一个后台线程采样。</summary>
+        public static void Start(int cmdPid)
+        {
+            int gen;
+            lock (_gate)
+            {
+                _gen++;
+                gen = _gen;
+                _t0 = DateTime.Now;
+                _rootPid = cmdPid;
+                _nodePid = 0;
+                _seenPids.Clear();
+                _seenPids.Add(cmdPid);
+            }
+            Log.Write("启动观测：开始（cmd pid=" + cmdPid + "）");
+            ThreadPool.QueueUserWorkItem(delegate { Loop(gen); });
+        }
+
+        /// <summary>在启动流程的关键点打一条带「距开始多少秒」的日志。</summary>
+        public static void Mark(string what)
+        {
+            Log.Write("启动观测 +" + ElapsedSeconds.ToString("0.0") + "s  " + what);
+        }
+
+        private static bool Alive(int gen)
+        {
+            lock (_gate) { return gen == _gen; }
+        }
+
+        private static void Loop(int gen)
+        {
+            TimeSpan last = TimeSpan.Zero;
+            DateTime lastCpuAt = DateTime.Now;
+            DateTime lastFindAt = DateTime.MinValue;
+            int loops = 0;
+            while (true)
+            {
+                if (!Alive(gen)) return;
+                if (ElapsedSeconds > 300) { Mark("观测结束（满 5 分钟）"); lock (_gate) { if (gen == _gen) _gen++; } return; }
+                try
+                {
+                    int node;
+                    lock (_gate) { node = _nodePid; }
+                    if (node == 0)
+                    {
+                        // 找不到 node 时也别 0.5 秒一次查 WMI：两秒一次足够，别把观测本身变成负担。
+                        if ((DateTime.Now - lastFindAt).TotalSeconds >= 2) { lastFindAt = DateTime.Now; node = FindNode(); }
+                        else node = 0;
+                        if (node > 0)
+                        {
+                            lock (_gate) { _nodePid = node; }
+                            Mark("发现 node 进程 pid=" + node);
+                            lastCpuAt = DateTime.Now;
+                        }
+                    }
+                    else if ((DateTime.Now - lastCpuAt).TotalSeconds >= 2)
+                    {
+                        TimeSpan cpu = ReadCpu(node);
+                        if (cpu < TimeSpan.Zero)
+                        {
+                            lock (_gate) { if (_nodePid == node) _nodePid = 0; }
+                            Mark("node 进程不见了（pid=" + node + "），继续观察");
+                        }
+                        else
+                        {
+                            Mark("node pid=" + node + " 近2秒CPU=" + (cpu - last).TotalSeconds.ToString("0.00") + "s 累计=" + cpu.TotalSeconds.ToString("0.0") + "s");
+                            last = cpu;
+                        }
+                        lastCpuAt = DateTime.Now;
+                    }
+                    // 每 4 秒扫一次子孙进程：MCP 服务器（python/node）什么时候出现一目了然。
+                    if (++loops % 8 == 0) ScanChildren();
+                }
+                catch { }
+                Thread.Sleep(500);
+            }
+        }
+
+        private static TimeSpan ReadCpu(int pid)
+        {
+            try
+            {
+                using (Process p = Process.GetProcessById(pid))
+                {
+                    p.Refresh();
+                    return p.TotalProcessorTime;
+                }
+            }
+            catch { return TimeSpan.MinValue; }
+        }
+
+        private static int FindNode()
+        {
+            int node = 0;
+            try
+            {
+                int root;
+                lock (_gate) { root = _rootPid; }
+                using (ManagementObjectSearcher s = new ManagementObjectSearcher(
+                    "SELECT ProcessId,ParentProcessId,CommandLine FROM Win32_Process WHERE ParentProcessId=" + root))
+                using (ManagementObjectCollection list = s.Get())
+                {
+                    foreach (ManagementObject o in list)
+                    {
+                        int pid = ToInt(o["ProcessId"]);
+                        string cmdline = Convert.ToString(o["CommandLine"]);
+                        if (pid <= 0) continue;
+                        NoteChild(pid, cmdline);
+                        if (node == 0 && cmdline.IndexOf("node", StringComparison.OrdinalIgnoreCase) >= 0) node = pid;
+                    }
+                }
+            }
+            catch { }
+            return node;
+        }
+
+        private static void ScanChildren()
+        {
+            try
+            {
+                int root, node;
+                lock (_gate) { root = _rootPid; node = _nodePid; }
+                Scan(root);
+                if (node > 0) Scan(node);
+            }
+            catch { }
+        }
+
+        private static void Scan(int parentPid)
+        {
+            try
+            {
+                using (ManagementObjectSearcher s = new ManagementObjectSearcher(
+                    "SELECT ProcessId,ParentProcessId,CommandLine FROM Win32_Process WHERE ParentProcessId=" + parentPid))
+                using (ManagementObjectCollection list = s.Get())
+                    foreach (ManagementObject o in list) NoteChild(ToInt(o["ProcessId"]), Convert.ToString(o["CommandLine"]));
+            }
+            catch { }
+        }
+
+        private static int ToInt(object v)
+        {
+            try { return v == null ? 0 : Convert.ToInt32(v); } catch { return 0; }
+        }
+
+        private static void NoteChild(int pid, string cmdline)
+        {
+            bool fresh = false;
+            lock (_gate)
+            {
+                if (pid > 0 && !_seenPids.Contains(pid)) { _seenPids.Add(pid); fresh = true; }
+            }
+            if (!fresh) return;
+            string head = (cmdline == null ? "" : cmdline.Replace("\r", " ").Replace("\n", " ")).Trim();
+            if (head.Length > 120) head = head.Substring(0, 120);
+            Mark("子进程出现 pid=" + pid + "  " + head);
+        }
+    }
+
     internal static class Log
     {
         private const long MaxBytes = 1024 * 1024;   // 超过 1 MB 就换一份，避免日志无限增长
@@ -669,6 +849,7 @@ namespace DshLauncher
             _timer.Interval = 1000;
             _timer.Tick += delegate { Refresh_(); };
             _timer.Start();
+            StartPortWatch();   // 端口探测放到后台，UI 线程只读结果
 
             Refresh_();
             if (!_silent) Log.Write("启动器已运行（端口 " + Cfg.Port + "）");
@@ -704,7 +885,10 @@ namespace DshLauncher
             // tick 正是「停止中菜单一卡一卡」的来源；停止态的判定也不依赖探测结果。
             St prior;
             lock (_lock) prior = _state;
-            bool up = prior != St.Stopping && PortOpen();
+            // 端口探测只读后台线程的缓存：本机"没人监听"的端口不会立刻回绝，
+            // 而是耗满超时（实测 700ms）。放在这个一秒一次的回调里，UI 线程
+            // 每秒被吃掉 700ms，托盘菜单的悬浮高亮就会"不跟手"。
+            bool up = prior != St.Stopping && PortUpCached();
             St s;
             lock (_lock)
             {
@@ -1008,6 +1192,7 @@ namespace DshLauncher
                 _runningSince = startedAt;
                 _runningSinceTried = true;
                 Log.Write("已启动 dsh web（cmd pid=" + proc.Id + "），等待端口 " + Cfg.Port);
+                BootTrace.Start(proc.Id);
                 try { File.WriteAllText(Cfg.PidFile, "cmd=" + proc.Id + "\r\nport=" + Cfg.Port + "\r\nstarted=" + startedAt.ToString("s")); } catch { }
             }
             catch (Exception ex)
@@ -1033,6 +1218,7 @@ namespace DshLauncher
                             _state = St.Running;
                         }
                         Log.Write("端口已就绪");
+                        BootTrace.Mark("端口已就绪，服务开始应答");
                         Post(delegate { Refresh_(); });
                         return;
                     }
@@ -1303,6 +1489,7 @@ namespace DshLauncher
 
         private void OpenUi(string url = null)
         {
+            BootTrace.Mark("打开浏览器");
             if (url == null) url = Cfg.Url;
             if (url.IndexOf("token=", StringComparison.Ordinal) < 0)
             {
@@ -1557,14 +1744,40 @@ namespace DshLauncher
         }
 
         // ---------- 工具 ----------
-        public static bool PortOpen()
+        /// <summary>最近一次后台探测的结论（最多约 1 秒旧）。UI 线程只读这个。</summary>
+        private static volatile bool _portUp;
+        private static int _portWatchStarted;
+
+        /// <summary>
+        /// 后台线程轮询端口。为什么非要挪出 UI 线程：本机连一个"没人监听"的回环端口
+        /// 不会立刻收到 RST，而是要耗满超时（实测 700ms），停止服务后每秒一次的探测
+        /// 就把 UI 线程吃掉七成，托盘菜单鼠标划过要等半秒才加深——这就是"不跟手"。
+        /// </summary>
+        private static void StartPortWatch()
+        {
+            if (Interlocked.CompareExchange(ref _portWatchStarted, 1, 0) != 0) return;
+            ThreadPool.QueueUserWorkItem(delegate
+            {
+                while (true)
+                {
+                    bool up = PortOpenTimed(350);
+                    _portUp = up;
+                    try { Thread.Sleep(up ? 900 : 350); } catch { }
+                }
+            });
+        }
+
+        private static bool PortUpCached() { return _portUp; }
+
+        /// <summary>连通性探测。注意：端口关着时会耗满 timeout，别在 UI 线程上调。</summary>
+        public static bool PortOpenTimed(int timeoutMs)
         {
             try
             {
                 using (TcpClient c = new TcpClient())
                 {
                     IAsyncResult ar = c.BeginConnect(IPAddress.Loopback, Cfg.Port, null, null);
-                    bool ok = ar.AsyncWaitHandle.WaitOne(700);
+                    bool ok = ar.AsyncWaitHandle.WaitOne(timeoutMs);
                     if (ok) c.EndConnect(ar);
                     ar.AsyncWaitHandle.Close();   // 以前这个等待句柄没人关，每秒一次会一直攒
                     return ok && c.Connected;
@@ -1572,6 +1785,8 @@ namespace DshLauncher
             }
             catch { return false; }
         }
+
+        public static bool PortOpen() { return PortOpenTimed(700); }
 
         /// <summary>等端口从“通”变成“不通”（停止服务后给系统一点时间释放端口）。</summary>
         public static bool WaitPortClosed(int ms)

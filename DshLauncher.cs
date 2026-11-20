@@ -273,16 +273,57 @@ namespace DshLauncher
             catch { return null; }
         }
 
-        /// <summary>刚拉起服务时，等日志里出现带 token 的地址（最多 ms 毫秒）。</summary>
-        public static void WaitForUrl(int ms)
+        /// <summary>
+        /// 等「带 token 的地址」落盘，并对它做一次 HTTP 探活；成功返回该地址，超时返回最后读到的地址（可能为 null）。
+        /// 为什么不能只看端口：dsh web 先 bind 端口、再起 MCP 子进程和插件，最后才打印带 token 的地址；
+        /// 这台机器上「端口就绪 → token 落盘」实测差 20 秒以上，固定等几秒必然读不到 token。
+        /// </summary>
+        public static string WaitReadyUrl(int ms)
         {
             DateTime end = DateTime.Now.AddMilliseconds(ms);
+            string seen = null;
+            int probes = 0;
             while (DateTime.Now < end)
             {
-                if (ReadTokenUrl() != null) return;
-                System.Threading.Thread.Sleep(250);
+                if (seen == null) seen = ReadTokenUrl();
+                if (seen != null)
+                {
+                    probes++;
+                    if (ProbeHttp(seen, 2500)) return seen;
+                    // 地址已经在日志里了，探活失败多半是探测环境（代理/防火墙）问题，别为此耽误开页
+                    if (probes >= 3) return seen;
+                }
+                Thread.Sleep(400);
             }
+            return seen;
         }
+
+        /// <summary>对本机地址做一次 GET 探活：拿到 HTTP 响应（非 5xx）就算服务已在应答。</summary>
+        public static bool ProbeHttp(string url, int timeoutMs)
+        {
+            try
+            {
+                HttpWebRequest req = (HttpWebRequest)WebRequest.Create(url);
+                req.Method = "GET";
+                req.Proxy = null;                  // 本机地址，别让系统代理插一脚
+                req.Timeout = timeoutMs;
+                req.ReadWriteTimeout = timeoutMs;
+                req.AllowAutoRedirect = false;
+                req.KeepAlive = false;
+                using (HttpWebResponse resp = (HttpWebResponse)req.GetResponse())
+                    return (int)resp.StatusCode < 500;
+            }
+            catch (WebException wex)
+            {
+                HttpWebResponse r = wex.Response as HttpWebResponse;
+                if (r == null) return false;
+                int code = (int)r.StatusCode;
+                r.Close();
+                return code < 500;
+            }
+            catch { return false; }
+        }
+
         public static string StateDir
         {
             get
@@ -729,13 +770,18 @@ namespace DshLauncher
                 _browserOpenedThisRun = true;
                 if (!_silent)
                 {
-                    // 等 token 地址落盘可能要几秒，绝不能在 UI 线程上等（那会让托盘菜单卡住），
-                    // 因此丢到线程池里等，等到了再封送回 UI 线程打开。
+                    // 等 ready 再开页：端口通 ≠ 能打开（服务要先起 MCP 子进程和插件，最后才打印 token 地址），
+                    // 因此在线程池里等到「token 地址出现 + HTTP 探活通过」再封送回 UI 线程开页，最多 90 秒；
+                    // 真等不到才退回裸地址并提示（见 OpenUi）。
                     ThreadPool.QueueUserWorkItem(delegate
                     {
-                        if (!PortOpen()) return;
-                        Cfg.WaitForUrl(8000);
-                        Post(delegate { OpenUi(); });
+                        string readyUrl = Cfg.WaitReadyUrl(90000);
+                        if (readyUrl == null) Log.Write("等待 token 地址超时（90 秒），将打开裸地址");
+                        Post(delegate
+                        {
+                            if (_state != St.Running) return;   // 等待期间被停掉/重启了，别开旧地址
+                            OpenUi(readyUrl);
+                        });
                     });
                 }
             }
@@ -1255,9 +1301,9 @@ namespace DshLauncher
             else { _browserOpenedThisRun = true; OpenUi(); }
         }
 
-        private void OpenUi()
+        private void OpenUi(string url = null)
         {
-            string url = Cfg.Url;
+            if (url == null) url = Cfg.Url;
             if (url.IndexOf("token=", StringComparison.Ordinal) < 0)
             {
                 // 读不到带 token 的地址是 dsh 日志格式变了/日志被清了的信号，

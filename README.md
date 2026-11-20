@@ -22,7 +22,7 @@
 
 ## 快速开始
 
-**方式一（推荐，不用装任何东西）**：下载 [`dist/DSH-Web-Launcher-portable-v1.20.zip`](dist/DSH-Web-Launcher-portable-v1.20.zip)
+**方式一（推荐，不用装任何东西）**：下载 [`dist/DSH-Web-Launcher-portable-v1.21.zip`](dist/DSH-Web-Launcher-portable-v1.21.zip)
 解压到任意固定目录，双击 `DshLauncher.exe`。第一次可能被 SmartScreen 拦，点「更多信息 → 仍要运行」。
 
 **方式二（自己编译）**：装好 .NET Framework 4 自带的 `csc.exe`（Win10/11 自带），
@@ -133,7 +133,7 @@
 2. 端口已通 → 只是打开浏览器，**绝不再拉起第二个 dsh web**。
 3. 端口不通 → 用隐藏的控制台跑
    `node "…\@deepseek-ai\dsh\lib\bin.js" web --port 3080 --no-open`
-   （`--no-open` 是关键：不让 dsh 自己再弹一次浏览器），轮询到端口就绪后再打开页面。
+   （`--no-open` 是关键：不让 dsh 自己再弹一次浏览器），端口就绪后再等日志里出现带 token 的地址、并探活通过，才打开页面。
 4. 托盘图标颜色就是状态：灰=未运行，橙=启动中，绿=运行中，红=启动失败。
 
 ## 关于 token（吃一堑长一智）
@@ -144,6 +144,7 @@ dsh web 现在只认**带 token 的地址**，直接开 `http://127.0.0.1:3080/`
 - 宿主启动时会把带 token 的地址打印出来，落到 `dsh-web.log`，形如
   `dsh web: http://127.0.0.1:3080/?token=xxxxxxxx`
 - 启动器每次打开页面前都从这份日志里取**最后一条**带 token 的地址，所以**重启服务后 token 变了也照样能进**。
+- 拿到地址后还会对这个地址发一次 GET 探活（401/403 也算服务在应答），确认连得上再开浏览器；最多等 90 秒，超时才退回裸地址。
 - 读这份日志必须用 `FileShare.ReadWrite` 打开——宿主一直占着它在写，普通读法会报“文件正被另一进程使用”。
 - **唯一例外**：如果你自己在终端里敲 `dsh web` 起服务，启动器读不到那份日志，就只能开裸地址（会 401）。这种情况请直接把终端里打印的地址复制到浏览器。
 
@@ -183,7 +184,7 @@ dsh web 现在只认**带 token 的地址**，直接开 `http://127.0.0.1:3080/`
 
 ## 发给别人用（便携版）
 
-`dist\DSH-Web-Launcher-portable-v1.20.zip`（约 65 KB）解压即用，里面只有 4 个文件：
+`dist\DSH-Web-Launcher-portable-v1.21.zip`（约 66 KB）解压即用，里面只有 4 个文件：
 
 | 文件 | 说明 |
 | --- | --- |

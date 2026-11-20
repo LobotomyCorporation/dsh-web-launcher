@@ -248,6 +248,31 @@ namespace DshLauncher
             catch { return null; }
         }
 
+        /// <summary>
+        /// 读 dsh-web.log 的最后一段，用于启动失败时把真正的报错带给用户。
+        /// 必须用 FileShare.ReadWrite 打开：启动失败的瞬间宿主可能还在写日志。
+        /// </summary>
+        public static string ReadLogTail(int maxChars)
+        {
+            try
+            {
+                if (!File.Exists(LogFile) || maxChars <= 0) return null;
+                using (FileStream fs = new FileStream(LogFile, FileMode.Open, FileAccess.Read,
+                                                      FileShare.ReadWrite | FileShare.Delete))
+                {
+                    long len = fs.Length;
+                    int take = (int)Math.Min(len, (long)maxChars);
+                    if (take <= 0) return null;
+                    fs.Seek(-take, SeekOrigin.End);
+                    byte[] buf = new byte[take];
+                    int n = fs.Read(buf, 0, take);
+                    if (n <= 0) return null;
+                    return System.Text.Encoding.UTF8.GetString(buf, 0, n).Trim();
+                }
+            }
+            catch { return null; }
+        }
+
         /// <summary>刚拉起服务时，等日志里出现带 token 的地址（最多 ms 毫秒）。</summary>
         public static void WaitForUrl(int ms)
         {
@@ -915,6 +940,7 @@ namespace DshLauncher
                 return;
             }
 
+            Process proc = null;
             try
             {
                 ProcessStartInfo psi = new ProcessStartInfo();
@@ -924,14 +950,14 @@ namespace DshLauncher
                 psi.CreateNoWindow = true;
                 psi.WindowStyle = ProcessWindowStyle.Hidden;
                 DateTime startedAt = DateTime.Now;
-                Process p = Process.Start(psi);
-                if (p == null) throw new Exception("Process.Start 返回空");
+                proc = Process.Start(psi);
+                if (proc == null) throw new Exception("Process.Start 返回空");
                 _startedByUs = true;
                 _runToken++;
                 _runningSince = startedAt;
                 _runningSinceTried = true;
-                Log.Write("已启动 dsh web（cmd pid=" + p.Id + "），等待端口 " + Cfg.Port);
-                try { File.WriteAllText(Cfg.PidFile, "cmd=" + p.Id + "\r\nport=" + Cfg.Port + "\r\nstarted=" + startedAt.ToString("s")); } catch { }
+                Log.Write("已启动 dsh web（cmd pid=" + proc.Id + "），等待端口 " + Cfg.Port);
+                try { File.WriteAllText(Cfg.PidFile, "cmd=" + proc.Id + "\r\nport=" + Cfg.Port + "\r\nstarted=" + startedAt.ToString("s")); } catch { }
             }
             catch (Exception ex)
             {
@@ -957,6 +983,31 @@ namespace DshLauncher
                         }
                         Log.Write("端口已就绪");
                         Post(delegate { Refresh_(); });
+                        return;
+                    }
+                    // dsh.cmd 是同步等待 node 的：cmd 先退出通常就是 dsh web 起不来。
+                    // 不再干等 120 秒；立刻置 Error 并把 dsh-web.log 尾巴带给用户。
+                    bool exited = false;
+                    try { exited = proc.HasExited; } catch { }
+                    if (exited)
+                    {
+                        int pid = 0;
+                        try { pid = proc.Id; } catch { }
+                        lock (_lock)
+                        {
+                            if (token != _startToken || _state != St.Starting) return;
+                            _state = St.Error;
+                            _detail = "启动进程已退出";
+                        }
+                        Log.Write("启动进程已退出（cmd pid=" + pid + "），详见 " + Cfg.LogFile);
+                        string tail = Cfg.ReadLogTail(500);
+                        Post(delegate
+                        {
+                            Refresh_();
+                            Notify("启动失败", string.IsNullOrEmpty(tail)
+                                ? "dsh web 启动进程已退出，日志是空的。\n\n日志：" + Cfg.LogFile
+                                : "dsh web 启动进程已退出。日志最后几行：\n\n" + tail + "\n\n完整日志：" + Cfg.LogFile);
+                        });
                         return;
                     }
                     Thread.Sleep(700);

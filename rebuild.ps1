@@ -62,7 +62,15 @@ $install = @"
 set "SRC=%~dp0"
 set "DST=%LOCALAPPDATA%\Programs\DshLauncher"
 if not exist "%DST%" mkdir "%DST%"
-copy /y "%SRC%DshLauncher.exe" "%DST%\DshLauncher.exe" >nul || exit /b 1
+set /a tries=0
+:copyexe
+copy /y "%SRC%DshLauncher.exe" "%DST%\DshLauncher.exe" >nul 2>&1
+if not errorlevel 1 goto copiedexe
+set /a tries+=1
+if %tries% geq 10 exit /b 1
+ping -n 2 127.0.0.1 >nul
+goto copyexe
+:copiedexe
 copy /y "%SRC%dsh.ico" "%DST%\dsh.ico" >nul
 copy /y "%SRC%toast-inverted.png" "%DST%\dsh-toast.png" >nul
 if not exist "%DST%\icons" mkdir "%DST%\icons"

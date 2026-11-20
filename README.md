@@ -22,7 +22,7 @@
 
 ## 快速开始
 
-**方式一（推荐，不用装任何东西）**：下载 [`dist/DSH-Web-Launcher-portable-v1.18.zip`](dist/DSH-Web-Launcher-portable-v1.18.zip)
+**方式一（推荐，不用装任何东西）**：下载 [`dist/DSH-Web-Launcher-portable-v1.19.zip`](dist/DSH-Web-Launcher-portable-v1.19.zip)
 解压到任意固定目录，双击 `DshLauncher.exe`。第一次可能被 SmartScreen 拦，点「更多信息 → 仍要运行」。
 
 **方式二（自己编译）**：装好 .NET Framework 4 自带的 `csc.exe`（Win10/11 自带），
@@ -183,7 +183,7 @@ dsh web 现在只认**带 token 的地址**，直接开 `http://127.0.0.1:3080/`
 
 ## 发给别人用（便携版）
 
-`dist\DSH-Web-Launcher-portable-v1.18.zip`（约 65 KB）解压即用，里面只有 4 个文件：
+`dist\DSH-Web-Launcher-portable-v1.19.zip`（约 65 KB）解压即用，里面只有 4 个文件：
 
 | 文件 | 说明 |
 | --- | --- |
@@ -227,7 +227,7 @@ dsh web 现在只认**带 token 的地址**，直接开 `http://127.0.0.1:3080/`
 - `tools\`：`MenuPreview`（预览菜单）、`MakeIco`（PNG→ICO）、`IconPreview`（渲染图标四态）。
 - `rebuild.ps1`：编译 → 打 Medium 标签 → 重装 → 静默重启，一条命令搞定。
 - `PROJECT-REPORT.md`：**项目报告**——排障全过程、每个 bug 的根因、验证数据、维护手册、剩余风险。
-- `HANDOVER.md`：**交接文档**——v1.18 改动清单、构建/验证结果、当前 git 状态与下一轮建议。
+- `HANDOVER.md`：**交接文档**——v1.19 改动清单、构建/验证结果、当前 git 状态与下一轮建议。
 - 旧的 VBS / cmd / ps1 方案（原 `vbs-legacy\`）已于 2026-10-27 清理删除，取舍记录在项目报告 §4、§6。
 
 ## 许可
